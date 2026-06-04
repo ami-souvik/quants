@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     # ollama_model: any model you have pulled, e.g. "llama3.2:3b", "qwen2.5:7b", "mistral"
     ollama_base_url: str = Field(default="http://localhost:11434", description="Ollama server URL")
     ollama_model: str = Field(default="llama3.2:3b", description="Default Ollama model for local inference")
+    # Increase this if your hardware is slow (gemma4 / large models may need 300 s+).
+    # connect_timeout is always 5 s (fast fail if server unreachable).
+    ollama_read_timeout: int = Field(default=300, description="Ollama inference timeout in seconds")
 
     # Broker (Phase 2 only)
     kite_api_key: str = Field(default="")

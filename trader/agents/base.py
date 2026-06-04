@@ -225,9 +225,11 @@ class BaseAgent:
 
         start = time.monotonic()
         try:
-            # connect_timeout=5s (fail fast if server unreachable),
-            # read_timeout=90s (model might be slow to generate the first token).
-            resp = httpx.post(url, json=payload, timeout=httpx.Timeout(connect=5.0, read=90.0, write=10.0, pool=5.0))
+            # connect_timeout=5 s: fail fast if server is unreachable.
+            # read_timeout: configurable via OLLAMA_READ_TIMEOUT (default 300 s).
+            #   Large models like gemma4 on slow hardware may need 300 s+.
+            read_timeout = float(self.settings.ollama_read_timeout)
+            resp = httpx.post(url, json=payload, timeout=httpx.Timeout(connect=5.0, read=read_timeout, write=10.0, pool=5.0))
             resp.raise_for_status()
         except httpx.ConnectError as exc:
             raise RuntimeError(
