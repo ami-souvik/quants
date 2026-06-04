@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import logging
 
-from trader.agents.base import BaseAgent
+from trader.agents.base import BaseAgent, _safe_format
 from trader.agents.models import BullBearOutput, TokenUsage
 
 logger = logging.getLogger(__name__)
@@ -28,11 +28,12 @@ class BullBearAgent(BaseAgent):
         """
         Returns (output, token_usage, schema_valid).
         """
-        user_message = self._agent_prompt.format(
+        user_message = _safe_format(
+            self._agent_prompt,
             ticker=ticker,
-            news_agent_output=json.dumps(news_agent_output, default=str),
-            technical_agent_output=json.dumps(technical_agent_output, default=str),
-            fundamentals_agent_output=json.dumps(fundamentals_agent_output, default=str),
+            news_agent_output=json.dumps(news_agent_output, default=str, indent=2),
+            technical_agent_output=json.dumps(technical_agent_output, default=str, indent=2),
+            fundamentals_agent_output=json.dumps(fundamentals_agent_output, default=str, indent=2),
         )
 
         def call_fn():

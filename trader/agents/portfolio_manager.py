@@ -10,7 +10,7 @@ import json
 import logging
 from collections import Counter
 
-from trader.agents.base import BaseAgent
+from trader.agents.base import BaseAgent, _safe_format
 from trader.agents.models import PMDecision, TokenUsage, pm_hold_fallback
 from trader.config.settings import get_settings
 
@@ -46,20 +46,21 @@ class PortfolioManagerAgent(BaseAgent):
         Always returns a decision — falls back to HOLD on persistent errors.
         """
         settings = get_settings()
-        user_message = self._agent_prompt.format(
+        user_message = _safe_format(
+            self._agent_prompt,
             ticker=ticker,
-            news_agent_output=json.dumps(news_agent_output, default=str),
-            technical_agent_output=json.dumps(technical_agent_output, default=str),
-            fundamentals_agent_output=json.dumps(fundamentals_agent_output, default=str),
-            bull_bear_output=json.dumps(bull_bear_output, default=str),
-            cash_available=cash_available,
+            news_agent_output=json.dumps(news_agent_output, default=str, indent=2),
+            technical_agent_output=json.dumps(technical_agent_output, default=str, indent=2),
+            fundamentals_agent_output=json.dumps(fundamentals_agent_output, default=str, indent=2),
+            bull_bear_output=json.dumps(bull_bear_output, default=str, indent=2),
+            cash_available=f"{cash_available:,.2f}",
             open_positions_count=open_positions_count,
             position_qty=position_qty,
-            avg_price=avg_price,
+            avg_price=f"{avg_price:,.2f}",
             days_held=days_held,
-            drawdown_pct=drawdown_pct,
-            nav=nav,
-            max_position_value=max_position_value,
+            drawdown_pct=f"{drawdown_pct:.2f}",
+            nav=f"{nav:,.2f}",
+            max_position_value=f"{max_position_value:,.2f}",
             is_restricted=is_restricted,
         )
 

@@ -34,6 +34,21 @@ def _load_prompt(name: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _safe_format(template: str, **kwargs) -> str:
+    """
+    Safe string substitution that replaces only known {varname} placeholders.
+
+    Unlike str.format(), this never raises KeyError on unknown {tokens} such as
+    the JSON schema examples embedded in agent prompts (e.g. {ticker: "X", ...}).
+    Only exact single-identifier placeholders present in kwargs are replaced;
+    everything else is left verbatim.
+    """
+    result = template
+    for key, value in kwargs.items():
+        result = result.replace(f"{{{key}}}", str(value))
+    return result
+
+
 class BaseAgent:
     """
     Abstract base for all 5 trading agents.

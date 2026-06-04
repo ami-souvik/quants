@@ -258,7 +258,7 @@ def run_daily(trade_date_str: str | None = None) -> DailyRunState:
                 hours_back=24,
             )
             try:
-                corp_actions = fetch_corporate_actions(ticker, days_back=7)
+                corp_actions = fetch_corporate_actions(ticker, days_window=7)
             except Exception as e:
                 logger.warning("Corp actions fetch failed for %s: %s", ticker, e)
                 corp_actions = []

@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import logging
 
-from trader.agents.base import BaseAgent
+from trader.agents.base import BaseAgent, _safe_format
 from trader.agents.models import NewsSentimentOutput, TokenUsage
 
 logger = logging.getLogger(__name__)
@@ -32,12 +32,13 @@ class NewsSentimentAgent(BaseAgent):
         Returns (output, token_usage, schema_valid).
         schema_valid=False means both attempts failed; caller should treat as NEUTRAL.
         """
-        user_message = self._agent_prompt.format(
+        user_message = _safe_format(
+            self._agent_prompt,
             ticker=ticker,
             company_name=company_name,
             sector=sector,
-            news_articles=json.dumps(news_articles, default=str),
-            corporate_announcements=json.dumps(corporate_announcements, default=str),
+            news_articles=json.dumps(news_articles, default=str, indent=2),
+            corporate_announcements=json.dumps(corporate_announcements, default=str, indent=2),
             close_price=close_price,
             pct_1d=pct_1d,
             news_window_tag=news_window_tag,

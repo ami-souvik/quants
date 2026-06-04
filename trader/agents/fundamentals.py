@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import logging
 
-from trader.agents.base import BaseAgent
+from trader.agents.base import BaseAgent, _safe_format
 from trader.agents.models import FundamentalsOutput, TokenUsage
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,8 @@ class FundamentalsAgent(BaseAgent):
         """
         Returns (output, token_usage, schema_valid).
         """
-        user_message = self._agent_prompt.format(
+        user_message = _safe_format(
+            self._agent_prompt,
             ticker=ticker,
             company_name=company_name,
             sector=sector,
