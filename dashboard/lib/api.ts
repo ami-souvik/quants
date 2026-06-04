@@ -6,7 +6,22 @@
  * Route Handlers when you need client-triggered refreshes.
  */
 
-const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+// Two-URL pattern for Docker deployments:
+//   API_URL           — server-side only (SSR/Server Components inside the container)
+//                       Set to http://trader-api:8000 in docker-compose so the Next.js
+//                       server can reach the FastAPI container via Docker's internal DNS.
+//   NEXT_PUBLIC_API_URL — baked at build time; used by the browser (client components).
+//                       Set to http://localhost:8000 so the browser hits the mapped port.
+//
+// In local dev (npm run dev), both resolve to localhost:8000 and only
+// NEXT_PUBLIC_API_URL is needed.
+const BASE_URL =
+  (typeof window === "undefined"
+    ? process.env.API_URL          // server-side: docker internal hostname
+    : undefined) ??
+  process.env.NEXT_PUBLIC_API_URL ??
+  "http://localhost:8000";
+
 const API_KEY  = process.env.NEXT_PUBLIC_API_KEY  ?? "changeme-local-dev";
 
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {

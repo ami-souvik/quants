@@ -112,6 +112,10 @@ services:
     ports:
       - "3000:3000"
     environment:
+      # Server-side (SSR/Server Components inside the container):
+      # Use Docker's internal DNS so the Next.js server reaches trader-api.
+      API_URL: http://trader-api:8000
+      # Client-side (browser): use the host-mapped port so the browser can reach it.
       NEXT_PUBLIC_API_URL: http://localhost:8000
       NEXT_PUBLIC_API_KEY: ${API_KEY:-changeme-local-dev}
     depends_on:
