@@ -41,6 +41,120 @@ IST = ZoneInfo("Asia/Kolkata")
 _RBI_RATE = 5.25
 
 
+def _log_llm_backends(settings) -> None:
+    """
+    Log which LLM backend every agent will use, based on available API keys.
+    Printed once at the start of each daily run so the operator can spot
+    unexpected fallbacks immediately.
+    """
+    from trader.agents.news_sentiment import NewsSentimentAgent
+    from trader.agents.technical import TechnicalAgent
+    from trader.agents.fundamentals import FundamentalsAgent
+    from trader.agents.bull_bear import BullBearAgent
+    from trader.agents.portfolio_manager import PortfolioManagerAgent
+
+    has_anthropic = bool(settings.anthropic_api_key)
+    has_gemini    = bool(settings.gemini_api_key)
+
+    def _backend(model: str) -> str:
+        if model.startswith("ollama/"):
+            return f"Ollama ({settings.ollama_base_url})"
+        if model.startswith("anthropic/"):
+            return model.replace("anthropic/", "") if has_anthropic else f"⚠ OLLAMA FALLBACK — set ANTHROPIC_API_KEY"
+        if model.startswith("google/"):
+            return model.replace("google/", "") if has_gemini else f"⚠ OLLAMA FALLBACK — set GEMINI_API_KEY"
+        return f"⚠ OLLAMA FALLBACK (unrecognised prefix)"
+
+    logger.info("─── LLM backend summary ─────────────────────────────────────────")
+    for cls in [NewsSentimentAgent, TechnicalAgent, FundamentalsAgent, BullBearAgent, PortfolioManagerAgent]:
+        logger.info("  %-22s %s → %s", cls.name, cls.model, _backend(cls.model))
+    logger.info("─────────────────────────────────────────────────────────────────")
+
+
+def _check_ollama_if_needed(settings) -> None:
+    """
+    If any agent will fall back to Ollama, verify the server is reachable
+    before starting the 15-ticker loop. Raises RuntimeError immediately so
+    the operator sees a clear message rather than 15× 5-second timeouts.
+    """
+    from trader.agents.news_sentiment import NewsSentimentAgent
+    from trader.agents.technical import TechnicalAgent
+    from trader.agents.fundamentals import FundamentalsAgent
+    from trader.agents.bull_bear import BullBearAgent
+    from trader.agents.portfolio_manager import PortfolioManagerAgent
+
+    has_anthropic = bool(settings.anthropic_api_key)
+    has_gemini    = bool(settings.gemini_api_key)
+
+    def _needs_ollama(model: str) -> bool:
+        if model.startswith("ollama/"):
+            return True
+        if model.startswith("anthropic/") and not has_anthropic:
+            return True
+        if model.startswith("google/") and not has_gemini:
+            return True
+        if not any(model.startswith(p) for p in ("anthropic/", "google/", "ollama/")):
+            return True
+        return False
+
+    agents_needing_ollama = [
+        cls.name for cls in
+        [NewsSentimentAgent, TechnicalAgent, FundamentalsAgent, BullBearAgent, PortfolioManagerAgent]
+        if _needs_ollama(cls.model)
+    ]
+
+    if not agents_needing_ollama:
+        return  # all agents have cloud keys — no Ollama needed
+
+    logger.info(
+        "Agents using Ollama: %s — checking connectivity to %s …",
+        ", ".join(agents_needing_ollama),
+        settings.ollama_base_url,
+    )
+
+    import httpx
+    try:
+        r = httpx.get(
+            f"{settings.ollama_base_url.rstrip('/')}/api/tags",
+            timeout=5.0,
+        )
+        r.raise_for_status()
+        models = [m.get("name", "") for m in r.json().get("models", [])]
+        logger.info("Ollama reachable. Available models: %s", models or "(none pulled yet)")
+
+        # Warn if the configured model isn't pulled yet
+        ollama_model = settings.ollama_model
+        if models and not any(m.startswith(ollama_model.split(":")[0]) for m in models):
+            logger.warning(
+                "Configured OLLAMA_MODEL='%s' not found in Ollama. "
+                "Pull it first: ollama pull %s",
+                ollama_model, ollama_model,
+            )
+    except httpx.ConnectError:
+        raise RuntimeError(
+            f"\n\n"
+            f"  ╔══════════════════════════════════════════════════════════════╗\n"
+            f"  ║  OLLAMA UNREACHABLE — cannot start daily run                ║\n"
+            f"  ╠══════════════════════════════════════════════════════════════╣\n"
+            f"  ║  Server:  {settings.ollama_base_url:<50} ║\n"
+            f"  ║  Model:   {settings.ollama_model:<50} ║\n"
+            f"  ║                                                              ║\n"
+            f"  ║  Agents needing Ollama: {', '.join(agents_needing_ollama):<37} ║\n"
+            f"  ║                                                              ║\n"
+            f"  ║  Fix one of:                                                 ║\n"
+            f"  ║  1. Start Ollama on your server and pull the model           ║\n"
+            f"  ║       ollama serve  &&  ollama pull {settings.ollama_model:<24} ║\n"
+            f"  ║  2. Set the missing API key(s) in .env:                     ║\n"
+            f"  ║       {'GEMINI_API_KEY=AIza...' if not has_gemini else 'ANTHROPIC_API_KEY=sk-ant-...':<52} ║\n"
+            f"  ╚══════════════════════════════════════════════════════════════╝\n"
+        )
+    except httpx.TimeoutException:
+        raise RuntimeError(
+            f"Ollama at {settings.ollama_base_url} did not respond within 5 s. "
+            f"Check the server is running and the IP/port is correct."
+        )
+
+
 def _get_usd_inr() -> float:
     """Fetch current USD/INR rate via yfinance."""
     try:
@@ -182,6 +296,10 @@ def run_daily(trade_date_str: str | None = None) -> DailyRunState:
 
     logger.info("=== Daily run starting for %s ===", trade_date_str)
     trade_date = date.fromisoformat(trade_date_str)
+
+    # ── LLM backend pre-flight ─────────────────────────────────────────────────
+    _log_llm_backends(settings)
+    _check_ollama_if_needed(settings)
 
     # ── Idempotency check ─────────────────────────────────────────────────────
     if dynamo.daily_run_already_completed(trade_date_str):

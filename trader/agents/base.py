@@ -225,13 +225,28 @@ class BaseAgent:
 
         start = time.monotonic()
         try:
-            resp = httpx.post(url, json=payload, timeout=120.0)
+            # connect_timeout=5s (fail fast if server unreachable),
+            # read_timeout=90s (model might be slow to generate the first token).
+            resp = httpx.post(url, json=payload, timeout=httpx.Timeout(connect=5.0, read=90.0, write=10.0, pool=5.0))
             resp.raise_for_status()
-        except httpx.HTTPError as exc:
+        except httpx.ConnectError as exc:
             raise RuntimeError(
-                f"Ollama request failed ({url}): {exc}. "
-                f"Is Ollama running? OLLAMA_BASE_URL={base_url}"
+                f"Cannot connect to Ollama at {base_url}. "
+                f"Check that Ollama is running and OLLAMA_BASE_URL is correct. ({exc})"
             ) from exc
+        except httpx.TimeoutException as exc:
+            raise RuntimeError(
+                f"Ollama at {base_url} timed out after 90 s. "
+                f"The model '{raw_model}' may be too large for your hardware, "
+                f"or the server is overloaded. ({exc})"
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            raise RuntimeError(
+                f"Ollama returned HTTP {exc.response.status_code} for model '{raw_model}'. "
+                f"Is the model pulled? Run: ollama pull {raw_model}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"Ollama request failed ({url}): {exc}") from exc
         elapsed_ms = int((time.monotonic() - start) * 1000)
 
         data = resp.json()
