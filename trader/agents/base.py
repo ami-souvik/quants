@@ -213,6 +213,7 @@ class BaseAgent:
         base_url = self.settings.ollama_base_url.rstrip("/")
         url = f"{base_url}/v1/chat/completions"
 
+        read_timeout = float(self.settings.ollama_read_timeout)
         payload = {
             "model": raw_model,
             "messages": [
@@ -221,15 +222,23 @@ class BaseAgent:
             ],
             "temperature": temperature,
             "stream": False,
+            # Cap context window and output to keep inference fast on small hardware.
+            # Our prompts are ~800–1500 tokens; 4096 ctx is plenty.
+            "options": {
+                "num_ctx":     4096,
+                "num_predict": 512,   # agent outputs are always short JSON
+            },
         }
 
         start = time.monotonic()
         try:
-            # connect_timeout=5 s: fail fast if server is unreachable.
-            # read_timeout: configurable via OLLAMA_READ_TIMEOUT (default 300 s).
-            #   Large models like gemma4 on slow hardware may need 300 s+.
-            read_timeout = float(self.settings.ollama_read_timeout)
-            resp = httpx.post(url, json=payload, timeout=httpx.Timeout(connect=5.0, read=read_timeout, write=10.0, pool=5.0))
+            # connect=5 s: fail fast if server unreachable.
+            # read=OLLAMA_READ_TIMEOUT (default 300 s): tunable for slow hardware.
+            resp = httpx.post(
+                url,
+                json=payload,
+                timeout=httpx.Timeout(connect=5.0, read=read_timeout, write=10.0, pool=5.0),
+            )
             resp.raise_for_status()
         except httpx.ConnectError as exc:
             raise RuntimeError(
@@ -238,9 +247,9 @@ class BaseAgent:
             ) from exc
         except httpx.TimeoutException as exc:
             raise RuntimeError(
-                f"Ollama at {base_url} timed out after 90 s. "
-                f"The model '{raw_model}' may be too large for your hardware, "
-                f"or the server is overloaded. ({exc})"
+                f"Ollama at {base_url} timed out after {int(read_timeout)} s. "
+                f"Model '{raw_model}' may be too slow on this hardware. "
+                f"Try a smaller model (qwen2.5:1.5b, gemma3:1b) or raise OLLAMA_READ_TIMEOUT."
             ) from exc
         except httpx.HTTPStatusError as exc:
             raise RuntimeError(

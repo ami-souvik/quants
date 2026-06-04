@@ -154,6 +154,41 @@ def _check_ollama_if_needed(settings) -> None:
             f"Check the server is running and the IP/port is correct."
         )
 
+    # ── Warm up the model ─────────────────────────────────────────────────────
+    # The first inference request triggers model loading from disk into VRAM,
+    # which can take 20–60 s for 7B+ models. Fire a tiny warm-up request NOW
+    # so that cost doesn't land on RELIANCE ticker #1 and cause a timeout.
+    _warmup_ollama(settings)
+
+
+def _warmup_ollama(settings) -> None:
+    """
+    Send a tiny request to Ollama so the model is loaded into VRAM
+    before the first real ticker call. This converts a per-ticker cold-start
+    penalty (20–60 s) into a one-time startup cost.
+    """
+    import httpx
+
+    raw_model = settings.ollama_model.replace("ollama/", "")
+    url = f"{settings.ollama_base_url.rstrip('/')}/v1/chat/completions"
+    payload = {
+        "model": raw_model,
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": False,
+        "options": {"num_ctx": 128, "num_predict": 4},
+    }
+    logger.info("Warming up Ollama model '%s' (pre-loading into VRAM)…", raw_model)
+    start = time.monotonic()
+    try:
+        read_timeout = float(settings.ollama_read_timeout)
+        r = httpx.post(url, json=payload, timeout=httpx.Timeout(connect=5.0, read=read_timeout, write=5.0, pool=5.0))
+        r.raise_for_status()
+        elapsed = int((time.monotonic() - start) * 1000)
+        logger.info("Ollama warm-up done in %d ms — model ready.", elapsed)
+    except Exception as exc:
+        # Warm-up failure is non-fatal — log and continue; the first real call will retry.
+        logger.warning("Ollama warm-up failed (non-fatal): %s", exc)
+
 
 def _get_usd_inr() -> float:
     """Fetch current USD/INR rate via yfinance."""
