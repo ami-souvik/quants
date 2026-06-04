@@ -173,21 +173,30 @@ class BaseAgent:
         # Build generation config — disable thinking for 2.x models
         gen_config: dict = {
             "temperature":        temperature,
-            "max_output_tokens":  2048,
+            # 8192 ensures thinking tokens (Gemini 2.x) don't eat the budget
+            # when thinking_config is unavailable in older SDK versions.
+            "max_output_tokens":  8192,
             "response_mime_type": "application/json",
         }
         if any(v in raw_model for v in ("2.5", "2.0")):
-            # thinking_budget=0 disables CoT for Gemini 2.x thinking models.
-            # Wrapped in try/except: older SDK versions may not have this field.
-            try:
-                gen_config["thinking_config"] = {"thinking_budget": 0}
-            except Exception:
-                pass
+            gen_config["thinking_config"] = {"thinking_budget": 0}
+
+        # Build GenerationConfig — fall back without thinking_config if the
+        # installed SDK version doesn't support it (TypeError on unpack).
+        try:
+            generation_config = genai.GenerationConfig(**gen_config)
+        except TypeError:
+            gen_config.pop("thinking_config", None)
+            logger.debug(
+                "google-generativeai SDK does not support thinking_config — "
+                "increase max_output_tokens to compensate for thinking tokens."
+            )
+            generation_config = genai.GenerationConfig(**gen_config)
 
         client = genai.GenerativeModel(
             model_name=raw_model,
             system_instruction=self._system_prompt,
-            generation_config=genai.GenerationConfig(**gen_config),
+            generation_config=generation_config,
         )
 
         start = time.monotonic()
