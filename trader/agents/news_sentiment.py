@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 class NewsSentimentAgent(BaseAgent):
     name = "news_sentiment"
-    model = "gemini-2.5-flash"
+    model = "google/gemini-2.5-flash"
 
     def run(
         self,

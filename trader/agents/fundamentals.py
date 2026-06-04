@@ -15,7 +15,8 @@ logger = logging.getLogger(__name__)
 
 class FundamentalsAgent(BaseAgent):
     name = "fundamentals"
-    model = "claude-haiku-4-5"
+    # model = "anthropic/claude-haiku-4-5"
+    model = "google/gemini-2.5-flash"
 
     def run(
         self,
@@ -51,7 +52,8 @@ class FundamentalsAgent(BaseAgent):
         )
 
         def call_fn():
-            return self._call_anthropic(user_message)
+            # return self._call_anthropic(user_message)
+            return self._call_gemini(user_message)
 
         def parse_fn(text: str) -> FundamentalsOutput:
             return self._parse_output(text, FundamentalsOutput)

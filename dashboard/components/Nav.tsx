@@ -4,9 +4,9 @@ import { usePathname } from "next/navigation";
 import clsx from "clsx";
 
 const LINKS = [
-  { href: "/",          label: "Dashboard" },
+  { href: "/", label: "Dashboard" },
   { href: "/decisions", label: "Decisions" },
-  { href: "/metrics",   label: "Analytics" },
+  { href: "/metrics", label: "Analytics" },
 ];
 
 export function Nav() {
@@ -16,9 +16,9 @@ export function Nav() {
       <div className="container mx-auto px-4 max-w-7xl flex items-center justify-between h-14">
         <span className="font-semibold text-text flex items-center gap-2">
           <span className="text-accent text-lg">⬡</span>
-          NSE LLM Trader
+          Quants
           <span className="ml-2 px-2 py-0.5 rounded text-xs bg-gold/20 text-gold font-mono">
-            PAPER
+            paper
           </span>
         </span>
         <nav className="flex gap-1">

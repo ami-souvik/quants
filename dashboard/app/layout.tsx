@@ -3,7 +3,7 @@ import "./globals.css";
 import { Nav } from "@/components/Nav";
 
 export const metadata: Metadata = {
-  title: "NSE LLM Trader",
+  title: "Quants",
   description: "Multi-agent paper-trading dashboard for Indian equities (NSE)",
 };
 
@@ -21,7 +21,7 @@ export default function RootLayout({
             {children}
           </main>
           <footer className="border-t border-border py-3 text-center text-xs text-subtle">
-            NSE LLM Trader — Paper Trading Mode Only · Personal experiment · Not financial advice
+            Quants — Paper Trading Mode Only · Personal experiment · Not financial advice
           </footer>
         </div>
       </body>

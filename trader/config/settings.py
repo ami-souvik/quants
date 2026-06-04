@@ -28,6 +28,15 @@ class Settings(BaseSettings):
     anthropic_api_key: str = Field(default="", description="Anthropic API key")
     gemini_api_key: str = Field(default="", description="Google Gemini API key")
 
+    # Local LLM fallback (Ollama)
+    # Used automatically when anthropic_api_key / gemini_api_key are not set.
+    # ollama_base_url: the HTTP address of your Ollama server.
+    #   Local:  http://localhost:11434
+    #   Remote: http://<server-ip>:11434
+    # ollama_model: any model you have pulled, e.g. "llama3.2:3b", "qwen2.5:7b", "mistral"
+    ollama_base_url: str = Field(default="http://localhost:11434", description="Ollama server URL")
+    ollama_model: str = Field(default="llama3.2:3b", description="Default Ollama model for local inference")
+
     # Broker (Phase 2 only)
     kite_api_key: str = Field(default="")
     kite_api_secret: str = Field(default="")

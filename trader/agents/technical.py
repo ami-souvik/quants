@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 class TechnicalAgent(BaseAgent):
     name = "technical"
-    model = "gemini-2.5-flash"
+    model = "google/gemini-2.5-flash"
 
     def run(
         self,

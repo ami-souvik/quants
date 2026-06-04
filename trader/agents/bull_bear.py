@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 class BullBearAgent(BaseAgent):
     name = "bull_bear"
-    model = "claude-haiku-4-5"
+    model = "anthropic/claude-haiku-4-5"
 
     def run(
         self,
@@ -37,7 +37,7 @@ class BullBearAgent(BaseAgent):
         )
 
         def call_fn():
-            return self._call_anthropic(user_message)
+            return self._call_model(user_message)
 
         def parse_fn(text: str) -> BullBearOutput:
             return self._parse_output(text, BullBearOutput)
