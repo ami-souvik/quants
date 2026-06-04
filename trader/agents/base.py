@@ -146,23 +146,48 @@ class BaseAgent:
     ) -> tuple[str, TokenUsage]:
         """
         Call Google Gemini API.
-        System prompt injected as a system_instruction.
-        Accepts model name with or without the "google/" prefix.
-        Returns (raw_text_response, TokenUsage).
+
+        Key configuration choices
+        ─────────────────────────
+        response_mime_type="application/json"
+            Forces the model to emit only valid JSON — no markdown fences,
+            no prose. Eliminates the need to strip ```json ... ``` wrappers.
+
+        thinking_budget=0  (Gemini 2.x models)
+            Gemini 2.5 Flash uses chain-of-thought "thinking" by default.
+            Thinking tokens count against max_output_tokens, so at 1024 the
+            model burns ~990 tokens on internal reasoning and has only ~34
+            tokens left for the actual JSON → truncated output every time.
+            Setting thinking_budget=0 disables thinking entirely, which is
+            correct here: these are structured extraction tasks, not puzzles.
+
+        max_output_tokens=2048
+            Our largest agent output (PM decision) is ~300 tokens. 2048 gives
+            ample headroom without wasting quota.
         """
         import google.generativeai as genai
 
-        # Strip provider prefix so the Gemini SDK gets the bare model name
         raw_model = (model or self.model).replace("google/", "")
-
         genai.configure(api_key=self.settings.gemini_api_key)
+
+        # Build generation config — disable thinking for 2.x models
+        gen_config: dict = {
+            "temperature":        temperature,
+            "max_output_tokens":  2048,
+            "response_mime_type": "application/json",
+        }
+        if any(v in raw_model for v in ("2.5", "2.0")):
+            # thinking_budget=0 disables CoT for Gemini 2.x thinking models.
+            # Wrapped in try/except: older SDK versions may not have this field.
+            try:
+                gen_config["thinking_config"] = {"thinking_budget": 0}
+            except Exception:
+                pass
+
         client = genai.GenerativeModel(
             model_name=raw_model,
             system_instruction=self._system_prompt,
-            generation_config=genai.GenerationConfig(
-                temperature=temperature,
-                max_output_tokens=1024,
-            ),
+            generation_config=genai.GenerationConfig(**gen_config),
         )
 
         start = time.monotonic()
@@ -171,8 +196,12 @@ class BaseAgent:
 
         text = response.text
         metadata = getattr(response, "usage_metadata", None)
-        input_tokens = getattr(metadata, "prompt_token_count", 0) or 0
-        output_tokens = getattr(metadata, "candidates_token_count", 0) or 0
+        input_tokens  = getattr(metadata, "prompt_token_count",      0) or 0
+        output_tokens = getattr(metadata, "candidates_token_count",   0) or 0
+        # thoughts_tokens is non-zero when thinking is active (should be 0 now)
+        thought_tokens = getattr(metadata, "thoughts_token_count",   0) or 0
+        if thought_tokens:
+            logger.debug("[%s] %s — thinking tokens: %d", self.name, raw_model, thought_tokens)
 
         cost = _model_cost_compute(raw_model, input_tokens=input_tokens, output_tokens=output_tokens)
 
@@ -336,16 +365,30 @@ class BaseAgent:
     @staticmethod
     def _extract_json(text: str) -> dict[str, Any]:
         """
-        Strip markdown code fences and parse JSON.
-        LLMs sometimes wrap JSON in ```json ... ```.
+        Robustly extract a JSON object from an LLM response.
+
+        Handles (in order):
+        1. Clean JSON  → {"key": ...}
+        2. Markdown fences → ```json\\n{...}\\n```
+        3. Prose prefix  → "Here is the JSON:\\n{...}"  (find first '{')
         """
+        import re
         text = text.strip()
+
+        # Strip markdown fences
         if text.startswith("```"):
             lines = text.split("\n")
-            # Drop first and last fence lines
-            inner = "\n".join(lines[1:] if lines[-1].strip() == "```" else lines[1:])
-            inner = inner.rstrip("`").strip()
-            text = inner
+            inner_lines = lines[1:]                     # drop opening fence line
+            if inner_lines and inner_lines[-1].strip().startswith("```"):
+                inner_lines = inner_lines[:-1]          # drop closing fence line
+            text = "\n".join(inner_lines).strip()
+
+        # If it still doesn't start with '{', find the first JSON object
+        if not text.startswith("{"):
+            match = re.search(r"\{", text)
+            if match:
+                text = text[match.start():]
+
         return json.loads(text)
 
     def _parse_output(self, text: str, model_class: type[T]) -> T:
