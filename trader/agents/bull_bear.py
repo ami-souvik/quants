@@ -16,7 +16,8 @@ logger = logging.getLogger(__name__)
 
 class BullBearAgent(BaseAgent):
     name = "bull_bear"
-    model = "anthropic/claude-haiku-4-5"
+    # model = "anthropic/claude-haiku-4-5"
+    model = "google/gemini-2.5-flash"
 
     def run(
         self,

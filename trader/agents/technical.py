@@ -38,7 +38,7 @@ class TechnicalAgent(BaseAgent):
         )
 
         def call_fn():
-            return self._call_gemini(user_message)
+            return self._call_model(user_message)
 
         def parse_fn(text: str) -> TechnicalOutput:
             return self._parse_output(text, TechnicalOutput)
