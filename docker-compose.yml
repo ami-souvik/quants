@@ -13,7 +13,7 @@ services:
       # Bind-mount so logs written inside the container appear on the host at ./logs/
       # Tail them with: tail -f logs/trader.log
       - ./logs:/app/logs
-    command: uvicorn trader.main:app --reload --host 0.0.0.0 --port 8000
+    command: uvicorn trader.main:app --reload --reload-dir trader --host 0.0.0.0 --port 8000
     depends_on:
       redis:
         condition: service_started
