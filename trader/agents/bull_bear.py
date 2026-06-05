@@ -37,10 +37,35 @@ class BullBearAgent(BaseAgent):
             fundamentals_agent_output=json.dumps(fundamentals_agent_output, default=str, indent=2),
         )
 
+        news_label = news_agent_output.get("sentiment_label", "?")
+        tech_signal = technical_agent_output.get("technical_signal", "?")
+        fund_bias = fundamentals_agent_output.get("fundamental_bias", "?")
+        logger.info(
+            "[bull_bear][%s] Input signals: news=%s tech=%s fundamentals=%s",
+            ticker, news_label, tech_signal, fund_bias,
+        )
+
         def call_fn():
             return self._call_model(user_message)
 
         def parse_fn(text: str) -> BullBearOutput:
             return self._parse_output(text, BullBearOutput)
 
-        return self._call_with_retry(call_fn, parse_fn)
+        result, usage, valid = self._call_with_retry(call_fn, parse_fn)
+
+        if valid and result is not None:
+            logger.info(
+                "[bull_bear][%s] Output: winner=%s delta=%.2f conf=%.2f | "
+                "key_risk: %s",
+                ticker,
+                result.debate_winner,
+                result.conviction_delta,
+                result.confidence,
+                result.key_risk[:120],
+            )
+            logger.debug("[bull_bear][%s] Bull thesis: %s", ticker, " | ".join(result.bull_thesis))
+            logger.debug("[bull_bear][%s] Bear thesis: %s", ticker, " | ".join(result.bear_thesis))
+        else:
+            logger.warning("[bull_bear][%s] Output: FAILED — schema invalid", ticker)
+
+        return result, usage, valid

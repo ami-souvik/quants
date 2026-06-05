@@ -204,6 +204,74 @@ def _get_usd_inr() -> float:
         return 84.0
 
 
+def _log_ticker_summary(ticker: str, state: dict, elapsed_ms: int, cumulative_cost_usd: float) -> None:
+    """
+    Print a structured one-block summary for a completed ticker run.
+    Covers skip reasons, agent signals, final decision, errors, and cost.
+    """
+    skip = state.get("skip_reason")
+    errors = state.get("errors", [])
+    tokens_used = state.get("tokens_used", {})
+    ticker_cost = sum(v.get("cost_usd", 0.0) for v in tokens_used.values())
+
+    if skip:
+        logger.info("[%s] SKIPPED (%s) | %dms cost=$%.5f", ticker, skip, elapsed_ms, ticker_cost)
+        return
+
+    # Pull agent outputs safely
+    news_out  = state.get("news_output") or {}
+    tech_out  = state.get("technical_output") or {}
+    fund_out  = state.get("fundamentals_output") or {}
+    bb_out    = state.get("bull_bear_output") or {}
+    pm_out    = state.get("pm_output") or {}
+
+    news_label  = news_out.get("sentiment_label", "—")
+    news_conf   = news_out.get("confidence", 0)
+    tech_signal = tech_out.get("technical_signal", "—")
+    tech_conf   = tech_out.get("confidence", 0)
+    fund_bias   = fund_out.get("fundamental_bias", "—")
+    fund_conf   = fund_out.get("confidence", 0)
+    bb_winner   = bb_out.get("debate_winner", "—")
+    bb_delta    = bb_out.get("conviction_delta", 0)
+    pm_decision = pm_out.get("decision", "—")
+    pm_conf     = pm_out.get("confidence", 0)
+    pm_qty      = pm_out.get("quantity_shares", 0)
+    pm_val      = pm_out.get("estimated_trade_value_inr", 0)
+    pm_rr       = pm_out.get("risk_reward_ratio", 0)
+
+    logger.info(
+        "[%s] ┌── Ticker Summary ──────────────────────────────────────",
+        ticker,
+    )
+    logger.info(
+        "[%s] │  News:   %-18s conf=%.2f",
+        ticker, news_label, news_conf,
+    )
+    logger.info(
+        "[%s] │  Tech:   %-18s conf=%.2f",
+        ticker, tech_signal, tech_conf,
+    )
+    logger.info(
+        "[%s] │  Fund:   %-18s conf=%.2f",
+        ticker, fund_bias, fund_conf,
+    )
+    logger.info(
+        "[%s] │  Debate: winner=%-6s delta=%.2f",
+        ticker, bb_winner, bb_delta,
+    )
+    logger.info(
+        "[%s] │  ► PM:   %-10s qty=%d val=₹%.0f conf=%.2f RR=%.1f",
+        ticker, pm_decision, pm_qty, pm_val, pm_conf, pm_rr,
+    )
+    if errors:
+        for err in errors:
+            logger.warning("[%s] │  ERROR: %s", ticker, err)
+    logger.info(
+        "[%s] └── %dms | cost=$%.5f | cumulative=$%.4f",
+        ticker, elapsed_ms, ticker_cost, cumulative_cost_usd,
+    )
+
+
 def _build_market_data(ticker: str, trade_date: date) -> dict:
     """
     Fetch OHLCV, compute technical indicators, and assemble the market_data dict
@@ -477,10 +545,8 @@ def run_daily(trade_date_str: str | None = None) -> DailyRunState:
         )
         run_state["total_cost_usd"] += total_ticker_cost
 
-        logger.info(
-            "[%s] Done in %dms | LLM cost today: $%.4f",
-            ticker, elapsed_ms, run_state["total_cost_usd"],
-        )
+        # ── Per-ticker summary block ───────────────────────────────────────────
+        _log_ticker_summary(ticker, state, elapsed_ms, run_state["total_cost_usd"])
 
     # ── End of run: persist positions + NAV ───────────────────────────────────
     _persist_open_positions(ledger, trade_date_str)

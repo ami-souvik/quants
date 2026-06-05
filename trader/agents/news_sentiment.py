@@ -44,10 +44,41 @@ class NewsSentimentAgent(BaseAgent):
             news_window_tag=news_window_tag,
         )
 
+        logger.info(
+            "[news_sentiment][%s] Input: %d articles, %d corp announcements | "
+            "close=%.2f pct_1d=%.2f%% window=%s",
+            ticker,
+            len(news_articles),
+            len(corporate_announcements),
+            close_price,
+            pct_1d,
+            news_window_tag,
+        )
+        if news_articles:
+            for art in news_articles[:5]:
+                logger.debug(
+                    "[news_sentiment][%s]   article: [%s] %s",
+                    ticker, art.get("source", "?"), art.get("title", "")[:120],
+                )
+
         def call_fn():
             return self._call_model(user_message)
 
         def parse_fn(text: str) -> NewsSentimentOutput:
             return self._parse_output(text, NewsSentimentOutput)
 
-        return self._call_with_retry(call_fn, parse_fn)
+        result, usage, valid = self._call_with_retry(call_fn, parse_fn)
+
+        if valid and result is not None:
+            logger.info(
+                "[news_sentiment][%s] Output: %s (score=%.2f conf=%.2f) | events: %s",
+                ticker,
+                result.sentiment_label,
+                result.sentiment_score,
+                result.confidence,
+                "; ".join(result.key_events[:3]) or "none",
+            )
+        else:
+            logger.warning("[news_sentiment][%s] Output: FAILED — schema invalid", ticker)
+
+        return result, usage, valid

@@ -261,7 +261,7 @@ def _fetch_feed_entries(feed_key: str, cfg: FeedConfig) -> list[dict]:
         ua = _NSE_UA if feed_key.startswith("nse_") else None
         feed = feedparser.parse(cfg.url, agent=ua) if ua else feedparser.parse(cfg.url)
     except Exception as e:
-        logger.warning("RSS fetch failed [%s]: %s", feed_key, e)
+        logger.warning("RSS fetch FAILED [%s] url=%s error=%s", feed_key, cfg.url, e)
         return []
 
     if feed.bozo and feed.bozo_exception:
@@ -339,28 +339,57 @@ def fetch_news_for_ticker(
     cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=hours_back)
 
     all_articles: list[dict] = []
+    feed_stats: dict[str, int] = {}
     for feed_key, cfg in agent_feeds.items():
         entries = _fetch_feed_entries(feed_key, cfg)
+        matched = []
         for article in entries:
             pub = article["published_at"]
             if pub.tzinfo is None:
                 pub = pub.replace(tzinfo=timezone.utc)
             if pub >= cutoff and _matches_ticker(article, ticker, company_name):
+                matched.append(article)
                 all_articles.append(article)
+        feed_stats[feed_key] = len(matched)
+        if matched:
+            logger.debug(
+                "[news][%s] feed=%s fetched=%d matched=%d",
+                ticker, feed_key, len(entries), len(matched),
+            )
+        else:
+            logger.debug(
+                "[news][%s] feed=%s fetched=%d matched=0 (no relevant articles)",
+                ticker, feed_key, len(entries),
+            )
 
+    pre_dedup = len(all_articles)
     deduped = deduplicate_articles(all_articles)
     deduped.sort(key=lambda a: a["published_at"], reverse=True)
     result = deduped[:8]
 
+    # Log feeds that had hits (non-zero matches)
+    hit_feeds = [f"{k}={v}" for k, v in feed_stats.items() if v > 0]
+    logger.info(
+        "[news][%s] agent=%s feeds=%d raw=%d post_dedup=%d returned=%d | hits: %s",
+        ticker, agent_name, len(agent_feeds), pre_dedup,
+        len(deduped), len(result),
+        (", ".join(hit_feeds) if hit_feeds else "none"),
+    )
+    if result:
+        for art in result:
+            pub_str = art["published_at"] if isinstance(art["published_at"], str) \
+                else art["published_at"].isoformat()
+            logger.debug(
+                "[news][%s]   [%s] %s (%s)",
+                ticker, art.get("source", "?"), art.get("title", "")[:120], pub_str[:16],
+            )
+
     serialisable = [
-        {**a, "published_at": a["published_at"].isoformat()}
+        {**a, "published_at": a["published_at"].isoformat()
+         if not isinstance(a["published_at"], str) else a["published_at"]}
         for a in result
     ]
     C._set(cache_key, serialisable)
-    logger.info(
-        "News for %s [agent=%s]: %d articles from %d feeds (last %dh)",
-        ticker, agent_name, len(result), len(agent_feeds), hours_back,
-    )
     return serialisable
 
 

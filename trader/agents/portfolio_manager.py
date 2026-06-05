@@ -47,6 +47,12 @@ class PortfolioManagerAgent(BaseAgent):
         Always returns a decision — falls back to HOLD on persistent errors.
         """
         settings = get_settings()
+        logger.info(
+            "[portfolio_manager][%s] Input: cash=₹%.0f positions=%d/%d "
+            "held=%d days drawdown=%.2f%% nav=₹%.0f restricted=%s",
+            ticker, cash_available, open_positions_count, 5,
+            days_held, drawdown_pct, nav, is_restricted,
+        )
         user_message = _safe_format(
             self._agent_prompt,
             ticker=ticker,
@@ -130,5 +136,26 @@ class PortfolioManagerAgent(BaseAgent):
             if valid and result is not None:
                 consensus = result
                 total_usage.model = "claude-sonnet-4-6"
+
+        logger.info(
+            "[portfolio_manager][%s] ══ DECISION: %s | qty=%d val=₹%.0f "
+            "conf=%.2f RR=%.1f agreement=%s ══",
+            ticker,
+            consensus.decision,
+            consensus.quantity_shares,
+            consensus.estimated_trade_value_inr,
+            consensus.confidence,
+            consensus.risk_reward_ratio,
+            consensus.agent_agreement,
+        )
+        logger.info(
+            "[portfolio_manager][%s]   thesis: %s",
+            ticker, consensus.primary_thesis[:200],
+        )
+        if consensus.kill_conditions:
+            logger.debug(
+                "[portfolio_manager][%s]   kill_conditions: %s",
+                ticker, " | ".join(consensus.kill_conditions),
+            )
 
         return consensus, total_usage, True

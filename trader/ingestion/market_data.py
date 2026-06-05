@@ -82,7 +82,17 @@ def fetch_eod_ohlcv(ticker: str, days: int = 30) -> pd.DataFrame:
     df = df.dropna(subset=["close"]).tail(days).reset_index(drop=True)
 
     C_OHLCV._set(cache_key, df)
-    logger.info("Fetched %d sessions for %s via yfinance", len(df), ticker)
+    if not df.empty:
+        date_from = df["date"].iloc[0]
+        date_to   = df["date"].iloc[-1]
+        close_last = float(df["close"].iloc[-1])
+        pct_chg = float((df["close"].iloc[-1] / df["close"].iloc[-2] - 1) * 100) if len(df) >= 2 else 0.0
+        logger.info(
+            "[market_data][%s] OHLCV: %d sessions %s→%s | close=%.2f pct1d=%+.2f%%",
+            ticker, len(df), date_from, date_to, close_last, pct_chg,
+        )
+    else:
+        logger.info("[market_data][%s] OHLCV: 0 sessions returned", ticker)
     return df
 
 
@@ -236,7 +246,7 @@ def compute_technical_indicators(df: pd.DataFrame) -> dict:
     avg_20 = float(vol.iloc[-20:].mean())
     volume_ratio = float(vol.iloc[-1] / avg_20) if avg_20 > 0 else None
 
-    return {
+    result = {
         "rsi_14":         rsi_14,
         "sma_5":          sma_5,
         "sma_20":         sma_20,
@@ -256,6 +266,13 @@ def compute_technical_indicators(df: pd.DataFrame) -> dict:
         "pct_change_20d": pct_20d,
         "volume_ratio":   volume_ratio,
     }
+    logger.debug(
+        "Indicators: RSI=%.1f MACD=%.3f/%.3f ADX=%.1f vol_ratio=%.2f "
+        "pct1d=%.2f%% pct5d=%.2f%% pct20d=%.2f%%",
+        rsi_14 or 0, macd or 0, macd_signal or 0, adx_14 or 0,
+        volume_ratio or 1, pct_1d or 0, pct_5d or 0, pct_20d or 0,
+    )
+    return result
 
 
 # ─── Nifty 50 index ───────────────────────────────────────────────────────────
