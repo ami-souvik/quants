@@ -67,7 +67,10 @@ def _log_llm_backends(settings) -> None:
 
     logger.info("─── LLM backend summary ─────────────────────────────────────────")
     for cls in [NewsSentimentAgent, TechnicalAgent, FundamentalsAgent, BullBearAgent, PortfolioManagerAgent]:
-        logger.info("  %-22s %s → %s", cls.name, cls.model, _backend(cls.model))
+        # model is now an instance property (reads from settings), not a class attr
+        agent = cls()
+        model = agent.model
+        logger.info("  %-22s %s → %s", cls.name, model, _backend(model))
     logger.info("─────────────────────────────────────────────────────────────────")
 
 
@@ -100,7 +103,7 @@ def _check_ollama_if_needed(settings) -> None:
     agents_needing_ollama = [
         cls.name for cls in
         [NewsSentimentAgent, TechnicalAgent, FundamentalsAgent, BullBearAgent, PortfolioManagerAgent]
-        if _needs_ollama(cls.model)
+        if _needs_ollama(cls().model)
     ]
 
     if not agents_needing_ollama:

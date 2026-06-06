@@ -15,7 +15,10 @@ logger = logging.getLogger(__name__)
 
 class TechnicalAgent(BaseAgent):
     name = "technical"
-    model = "google/gemini-2.5-flash"
+
+    @property
+    def model(self) -> str:  # type: ignore[override]
+        return self.settings.agent_model_technical
 
     def run(
         self,
@@ -41,13 +44,13 @@ class TechnicalAgent(BaseAgent):
             "[technical][%s] Input: RSI=%.1f MACD=%.3f/%.3f ADX=%.1f "
             "vol_ratio=%.2f pct1d=%.2f%% pct5d=%.2f%%",
             ticker,
-            indicators.get("rsi_14", 0),
-            indicators.get("macd", 0),
-            indicators.get("macd_signal", 0),
-            indicators.get("adx_14", 0),
-            indicators.get("volume_ratio", 1),
-            indicators.get("pct_change_1d", 0),
-            indicators.get("pct_change_5d", 0),
+            indicators.get("rsi_14") or 0.0,
+            indicators.get("macd") or 0.0,
+            indicators.get("macd_signal") or 0.0,
+            indicators.get("adx_14") or 0.0,
+            indicators.get("volume_ratio") or 0.0,
+            indicators.get("pct_change_1d") or 0.0,
+            indicators.get("pct_change_5d") or 0.0,
         )
         logger.debug(
             "[technical][%s] Full indicators: %s",
@@ -57,7 +60,7 @@ class TechnicalAgent(BaseAgent):
         )
 
         def call_fn():
-            return self._call_model(user_message)
+            return self._call_model(user_message, response_model=TechnicalOutput)
 
         def parse_fn(text: str) -> TechnicalOutput:
             return self._parse_output(text, TechnicalOutput)

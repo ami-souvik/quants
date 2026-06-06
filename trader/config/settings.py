@@ -61,6 +61,34 @@ class Settings(BaseSettings):
     # or http://dynamodb-local:8000 when running inside the compose network.
     dynamo_endpoint_url: str = Field(default="", description="DynamoDB endpoint override for local dev")
 
+    # Agent model configuration
+    # Use prefixes: "google/", "anthropic/", "ollama/" to select backend.
+    # Agents automatically fall back to Ollama if the corresponding API key is missing.
+    agent_model_news_sentiment: str = Field(
+        default="google/gemini-2.5-flash",
+        description="Model for Agent 1: News & Sentiment Analyst",
+    )
+    agent_model_technical: str = Field(
+        default="google/gemini-2.5-flash",
+        description="Model for Agent 2: Technical Analyst",
+    )
+    agent_model_fundamentals: str = Field(
+        default="google/gemini-2.5-flash",
+        description="Model for Agent 3: Fundamentals Analyst",
+    )
+    agent_model_bull_bear: str = Field(
+        default="google/gemini-2.5-flash",
+        description="Model for Agent 4: Bull vs Bear Debate",
+    )
+    agent_model_portfolio_manager: str = Field(
+        default="google/gemini-2.5-flash",
+        description="Model for Agent 5: Portfolio Manager (primary / self-consistency samples)",
+    )
+    agent_model_portfolio_manager_escalation: str = Field(
+        default="google/gemini-2.5-flash",
+        description="Model for Agent 5 escalation when confidence < threshold",
+    )
+
     # App behaviour
     paper_trading_mode: bool = Field(default=True)
     initial_capital_inr: float = Field(default=1_000_000.0)
@@ -88,6 +116,12 @@ class Settings(BaseSettings):
 
     # Dry-run (no DynamoDB writes, no fills)
     dry_run: bool = Field(default=False)
+
+    # Schema retry behaviour
+    # When true (default): on a Pydantic validation error the agent retries once.
+    # When false: log the error immediately and skip the retry (useful when
+    # native structured output is active and retries are wasted API calls).
+    agent_schema_retry_enabled: bool = Field(default=True)
 
     @field_validator("paper_trading_mode")
     @classmethod

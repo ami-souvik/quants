@@ -22,8 +22,10 @@ _ESCALATION_CONFIDENCE_THRESHOLD = 0.50
 
 class PortfolioManagerAgent(BaseAgent):
     name = "portfolio_manager"
-    # model = "anthropic/claude-haiku-4-5"
-    model = "google/gemini-2.5-flash"
+
+    @property
+    def model(self) -> str:  # type: ignore[override]
+        return self.settings.agent_model_portfolio_manager
 
     def run(
         self,
@@ -77,8 +79,12 @@ class PortfolioManagerAgent(BaseAgent):
         # ── Step 1: 3-sample self-consistency with Haiku ──────────────────────
         for i in range(_SELF_CONSISTENCY_SAMPLES):
             def call_fn():
-                # return self._call_model(user_message, model="anthropic/claude-haiku-4-5", temperature=0.3)
-                return self._call_model(user_message, model="google/gemini-2.5-flash", temperature=0.3)
+                return self._call_model(
+                    user_message,
+                    model=self.settings.agent_model_portfolio_manager,
+                    temperature=0.3,
+                    response_model=PMDecision,
+                )
 
             def parse_fn(text: str) -> PMDecision:
                 return self._parse_output(text, PMDecision)
@@ -121,8 +127,12 @@ class PortfolioManagerAgent(BaseAgent):
             )
             # Cost guard: only escalate if daily LLM budget not exhausted
             def call_sonnet():
-                # return self._call_model(user_message, model="anthropic/claude-sonnet-4-6", temperature=0.0)
-                return self._call_model(user_message, model="google/gemini-2.5-flash", temperature=0.0)
+                return self._call_model(
+                    user_message,
+                    model=self.settings.agent_model_portfolio_manager_escalation,
+                    temperature=0.0,
+                    response_model=PMDecision,
+                )
 
             def parse_sonnet(text: str) -> PMDecision:
                 return self._parse_output(text, PMDecision)

@@ -15,7 +15,10 @@ logger = logging.getLogger(__name__)
 
 class NewsSentimentAgent(BaseAgent):
     name = "news_sentiment"
-    model = "google/gemini-2.5-flash"
+
+    @property
+    def model(self) -> str:  # type: ignore[override]
+        return self.settings.agent_model_news_sentiment
 
     def run(
         self,
@@ -62,7 +65,7 @@ class NewsSentimentAgent(BaseAgent):
                 )
 
         def call_fn():
-            return self._call_model(user_message)
+            return self._call_model(user_message, response_model=NewsSentimentOutput)
 
         def parse_fn(text: str) -> NewsSentimentOutput:
             return self._parse_output(text, NewsSentimentOutput)

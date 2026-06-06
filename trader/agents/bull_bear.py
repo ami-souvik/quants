@@ -16,8 +16,10 @@ logger = logging.getLogger(__name__)
 
 class BullBearAgent(BaseAgent):
     name = "bull_bear"
-    # model = "anthropic/claude-haiku-4-5"
-    model = "google/gemini-2.5-flash"
+
+    @property
+    def model(self) -> str:  # type: ignore[override]
+        return self.settings.agent_model_bull_bear
 
     def run(
         self,
@@ -46,7 +48,7 @@ class BullBearAgent(BaseAgent):
         )
 
         def call_fn():
-            return self._call_model(user_message)
+            return self._call_model(user_message, response_model=BullBearOutput)
 
         def parse_fn(text: str) -> BullBearOutput:
             return self._parse_output(text, BullBearOutput)

@@ -28,6 +28,101 @@ T = TypeVar("T", bound=BaseModel)
 # Paths
 _PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
 
+# ─── Gemini schema helpers ────────────────────────────────────────────────────
+
+# JSON Schema keywords that Gemini's response_schema does NOT support.
+# Passing them raises "Unknown field for Schema: <keyword>".
+_GEMINI_UNSUPPORTED_KEYS = frozenset({
+    "title", "default", "minimum", "maximum",
+    "exclusiveMinimum", "exclusiveMaximum",
+    "minLength", "maxLength", "pattern",
+    "minItems", "maxItems",
+    "multipleOf",
+    "const",          # Pydantic emits {"const": "X"} for single-value Literals (e.g. ProductType="CNC")
+    "$schema", "$id",
+})
+
+
+def _resolve_refs(schema: dict, defs: dict) -> dict:
+    """
+    Recursively resolve $ref pointers using the $defs map.
+    Gemini doesn't support $ref / $defs — they must be inlined.
+    """
+    if "$ref" in schema:
+        ref_name = schema["$ref"].split("/")[-1]
+        resolved = _resolve_refs(defs.get(ref_name, {}), defs)
+        # Merge any sibling keys (e.g. description) into the resolved schema
+        merged = {**resolved}
+        for k, v in schema.items():
+            if k != "$ref":
+                merged[k] = v
+        return merged
+
+    result = {}
+    for key, value in schema.items():
+        if key in ("$defs", "$ref"):
+            continue  # drop — inlined above
+        if isinstance(value, dict):
+            result[key] = _resolve_refs(value, defs)
+        elif isinstance(value, list):
+            result[key] = [
+                _resolve_refs(item, defs) if isinstance(item, dict) else item
+                for item in value
+            ]
+        else:
+            result[key] = value
+    return result
+
+
+def _strip_unsupported(schema: dict) -> dict:
+    """
+    Recursively remove JSON Schema keywords that Gemini rejects.
+    Also collapses anyOf/oneOf used for Optional[X] → just X (non-nullable).
+    """
+    # Collapse Optional[X]: anyOf: [{...}, {type: null}] → the non-null branch
+    if "anyOf" in schema:
+        non_null = [s for s in schema["anyOf"] if s.get("type") != "null"]
+        if len(non_null) == 1:
+            # Replace the anyOf with the unwrapped type, keep sibling keys
+            merged = {**non_null[0]}
+            for k, v in schema.items():
+                if k != "anyOf":
+                    merged[k] = v
+            schema = merged
+        else:
+            # Multiple non-null branches — keep as-is but recurse
+            schema = {**schema, "anyOf": [_strip_unsupported(s) for s in schema["anyOf"]]}
+
+    result = {}
+    for key, value in schema.items():
+        if key in _GEMINI_UNSUPPORTED_KEYS:
+            continue
+        if isinstance(value, dict):
+            result[key] = _strip_unsupported(value)
+        elif isinstance(value, list):
+            result[key] = [
+                _strip_unsupported(item) if isinstance(item, dict) else item
+                for item in value
+            ]
+        else:
+            result[key] = value
+    return result
+
+
+def _pydantic_to_gemini_schema(model_class: type[BaseModel]) -> dict:
+    """
+    Convert a Pydantic model to a Gemini-compatible JSON schema dict.
+
+    Steps:
+    1. Generate full JSON schema via Pydantic (includes $defs, $ref, minimum, etc.)
+    2. Resolve all $ref / $defs so Gemini gets a fully inlined schema
+    3. Strip all keywords Gemini doesn't support
+    """
+    raw = model_class.model_json_schema()
+    defs = raw.get("$defs", {})
+    resolved = _resolve_refs(raw, defs)
+    return _strip_unsupported(resolved)
+
 
 def _load_prompt(name: str) -> str:
     path = _PROMPTS_DIR / f"{name}.md"
@@ -72,9 +167,15 @@ class BaseAgent:
         user_message: str,
         model: str | None = None,
         temperature: float = 0.0,
+        response_model: type[T] | None = None,
     ) -> tuple[str, TokenUsage]:
         """
         Call Anthropic API with prompt caching on the system prompt.
+
+        When response_model is provided, uses tool_choice to force structured
+        output matching the Pydantic model's JSON schema. This eliminates
+        schema validation failures by constraining the model's output format.
+
         Returns (raw_text_response, TokenUsage).
         """
         import anthropic
@@ -84,7 +185,8 @@ class BaseAgent:
         effective_model = effective_model.replace("anthropic/", "")
 
         start = time.monotonic()
-        response = client.messages.create(
+
+        create_kwargs: dict[str, Any] = dict(
             model=effective_model,
             max_tokens=1024,
             temperature=temperature,
@@ -97,7 +199,34 @@ class BaseAgent:
             ],
             messages=[{"role": "user", "content": user_message}],
         )
+
+        if response_model is not None:
+            schema = response_model.model_json_schema()
+            # Remove 'title' from the top-level schema; Anthropic doesn't need it
+            schema.pop("title", None)
+            create_kwargs["tools"] = [
+                {
+                    "name": "structured_output",
+                    "description": "Return the structured analysis result.",
+                    "input_schema": schema,
+                }
+            ]
+            create_kwargs["tool_choice"] = {"type": "tool", "name": "structured_output"}
+
+        response = client.messages.create(**create_kwargs)
         elapsed_ms = int((time.monotonic() - start) * 1000)
+
+        # Extract text: prefer tool_use block when structured output was requested
+        if response_model is not None:
+            tool_block = next(
+                (b for b in response.content if b.type == "tool_use"), None
+            )
+            if tool_block is not None:
+                text = json.dumps(tool_block.input)
+            else:
+                text = response.content[0].text
+        else:
+            text = response.content[0].text
 
         usage = response.usage
         input_tokens = usage.input_tokens
@@ -134,7 +263,7 @@ class BaseAgent:
             cost,
             elapsed_ms,
         )
-        return response.content[0].text, token_usage
+        return text, token_usage
 
     # ─── Gemini call ─────────────────────────────────────────────────────────
 
@@ -143,6 +272,7 @@ class BaseAgent:
         user_message: str,
         model: str | None = None,
         temperature: float = 0.0,
+        response_model: type[T] | None = None,
     ) -> tuple[str, TokenUsage]:
         """
         Call Google Gemini API.
@@ -176,18 +306,28 @@ class BaseAgent:
             "max_output_tokens":  2048,
             "response_mime_type": "application/json",
         }
+        if response_model is not None:
+            # Gemini only supports a subset of JSON Schema — strip unsupported
+            # keywords (minimum, maximum, maxItems, default, title, $ref, etc.)
+            # before passing. The cleaned dict is fully inlined (no $ref/$defs).
+            gen_config["response_schema"] = _pydantic_to_gemini_schema(response_model)
         if any(v in raw_model for v in ("2.5", "2.0")):
             # thinking_budget=0 disables CoT for Gemini 2.x thinking models.
-            # Wrapped in try/except: older SDK versions may not have this field.
-            try:
-                gen_config["thinking_config"] = {"thinking_budget": 0}
-            except Exception:
-                pass
+            # Try with thinking_config first; fall back silently for older SDK versions
+            # where GenerationConfig doesn't accept that keyword.
+            gen_config["thinking_config"] = {"thinking_budget": 0}
+
+        try:
+            generation_config = genai.GenerationConfig(**gen_config)
+        except TypeError:
+            # Older google-generativeai SDK doesn't support thinking_config
+            gen_config.pop("thinking_config", None)
+            generation_config = genai.GenerationConfig(**gen_config)
 
         client = genai.GenerativeModel(
             model_name=raw_model,
             system_instruction=self._system_prompt,
-            generation_config=genai.GenerationConfig(**gen_config),
+            generation_config=generation_config,
         )
 
         start = time.monotonic()
@@ -226,6 +366,7 @@ class BaseAgent:
         user_message: str,
         model: str | None = None,
         temperature: float = 0.0,
+        response_model: type[T] | None = None,  # accepted for API compatibility; unused
     ) -> tuple[str, TokenUsage]:
         """
         Call a local Ollama server via its OpenAI-compatible /v1/chat/completions endpoint.
@@ -316,6 +457,7 @@ class BaseAgent:
         user_message: str,
         model: str | None = None,
         temperature: float = 0.0,
+        response_model: type[T] | None = None,
     ) -> tuple[str, TokenUsage]:
         """
         Route to the correct backend based on model prefix and key availability.
@@ -327,16 +469,22 @@ class BaseAgent:
         3. model starts with "google/"    → Gemini if key set, else Ollama
         4. no recognised prefix           → fall back to Ollama
 
+        When response_model is provided, passes the Pydantic class to the backend
+        so it can use native structured-output APIs (Gemini response_schema,
+        Anthropic tool_choice) to constrain the model's output format.
+
         Logging a WARNING when falling back so you know which key is missing.
         """
         effective = model or self.model
 
         if effective.startswith("ollama/"):
-            return self._call_ollama(user_message, model=effective, temperature=temperature)
+            return self._call_ollama(user_message, model=effective, temperature=temperature,
+                                     response_model=response_model)
 
         if effective.startswith("anthropic/"):
             if self.settings.anthropic_api_key:
-                return self._call_anthropic(user_message, model=effective, temperature=temperature)
+                return self._call_anthropic(user_message, model=effective, temperature=temperature,
+                                            response_model=response_model)
             logger.warning(
                 "[%s] ANTHROPIC_API_KEY not set — falling back to Ollama (%s)",
                 self.name, self.settings.ollama_model,
@@ -345,7 +493,8 @@ class BaseAgent:
 
         if effective.startswith("google/"):
             if self.settings.gemini_api_key:
-                return self._call_gemini(user_message, model=effective, temperature=temperature)
+                return self._call_gemini(user_message, model=effective, temperature=temperature,
+                                         response_model=response_model)
             logger.warning(
                 "[%s] GEMINI_API_KEY not set — falling back to Ollama (%s)",
                 self.name, self.settings.ollama_model,
@@ -406,13 +555,17 @@ class BaseAgent:
     ) -> tuple[Any, TokenUsage, bool]:
         """
         Execute call_fn(), parse with parse_fn().
-        On ValidationError: retry up to max_retries times.
+        On ValidationError: retry up to max_retries times, unless
+        AGENT_SCHEMA_RETRY_ENABLED=false in which case we log and bail immediately.
         Returns (parsed_output, total_token_usage, schema_valid).
         """
+        retry_enabled = self.settings.agent_schema_retry_enabled
+        effective_max_retries = max_retries if retry_enabled else 0
+
         total_usage = TokenUsage(agent=self.name, model=self.model)
         last_exc: Exception | None = None
 
-        for attempt in range(max_retries + 1):
+        for attempt in range(effective_max_retries + 1):
             try:
                 text, usage = call_fn()
                 total_usage.input_tokens += usage.input_tokens
@@ -426,11 +579,19 @@ class BaseAgent:
 
             except (ValidationError, json.JSONDecodeError, KeyError, ValueError) as exc:
                 last_exc = exc
+                if not retry_enabled:
+                    logger.error(
+                        "[%s] Schema validation failed (AGENT_SCHEMA_RETRY_ENABLED=false"
+                        " — not retrying): %s",
+                        self.name,
+                        exc,
+                    )
+                    break
                 logger.warning(
                     "[%s] Schema validation failed (attempt %d/%d): %s",
                     self.name,
                     attempt + 1,
-                    max_retries + 1,
+                    effective_max_retries + 1,
                     exc,
                 )
 
