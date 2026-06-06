@@ -21,11 +21,13 @@ services:
         condition: service_completed_successfully
     environment:
       - REDIS_URL=redis://redis:6379
-      # Point to local DynamoDB inside the compose network
-      - DYNAMO_ENDPOINT_URL=http://dynamodb-local:8000
-      # Dummy credentials — DynamoDB Local ignores them
+      # DynamoDB endpoint: leave empty in .env to use real AWS DynamoDB,
+      # or set to http://dynamodb-local:8000 to use the local container.
+      - DYNAMO_ENDPOINT_URL=${DYNAMO_ENDPOINT_URL:-}
+      # AWS credentials — sourced from .env (real keys) or falls back to dummy for local DynamoDB
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-local}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-local}
+      - AWS_REGION=${AWS_REGION:-ap-south-1}
       # Log file path inside the container (bind-mounted to ./logs/ on host)
       - LOG_FILE=logs/trader.log
 
