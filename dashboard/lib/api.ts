@@ -79,6 +79,23 @@ export interface PositionsResponse {
   nav_inr: number;
 }
 
+// ─── Logs ─────────────────────────────────────────────────────────────────────
+
+export interface LogLine {
+  timestamp: string;
+  level: "INFO" | "WARNING" | "ERROR" | "CRITICAL" | "DEBUG";
+  logger: string;
+  message: string;
+  raw: string;
+}
+
+export interface LogsResponse {
+  date: string;
+  lines: LogLine[];
+  total: number;
+  has_error: boolean;
+}
+
 export interface AgentDecisionDetail {
   agent: string;
   model: string | null;
@@ -253,6 +270,9 @@ export const api = {
 
   analytics: () =>
     apiFetch<PerformanceAnalyticsResponse>("/api/metrics/analytics"),
+
+  logs: (date?: string) =>
+    apiFetch<LogsResponse>(`/api/logs${date ? `?date=${date}` : ""}`),
 };
 
 // ─── Indian number formatting helpers ────────────────────────────────────────

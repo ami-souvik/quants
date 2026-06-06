@@ -212,6 +212,25 @@ class AgentCostBreakdown(BaseModel):
     call_count: int
 
 
+# ─── Logs ────────────────────────────────────────────────────────────────────
+
+class LogLine(BaseModel):
+    timestamp: str
+    level: str          # INFO | WARNING | ERROR | DEBUG
+    logger: str
+    message: str
+    raw: str            # original log line for display
+
+
+class LogsResponse(BaseModel):
+    date: str
+    lines: list[LogLine]
+    total: int
+    has_error: bool
+
+
+# ─── Performance analytics ────────────────────────────────────────────────────
+
 class PerformanceAnalyticsResponse(BaseModel):
     sharpe: float
     sortino: float

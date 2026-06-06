@@ -26,7 +26,7 @@ from trader.logging_config import setup_logging
 
 setup_logging()
 
-from trader.api.routes import decisions, health, metrics, positions
+from trader.api.routes import decisions, health, logs, metrics, positions
 from trader.config.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -93,6 +93,7 @@ app.include_router(health.router)
 app.include_router(positions.router, dependencies=[_auth])
 app.include_router(decisions.router, dependencies=[_auth])
 app.include_router(metrics.router,   dependencies=[_auth])
+app.include_router(logs.router,      dependencies=[_auth])
 
 
 # ─── Root redirect ───────────────────────────────────────────────────────────
