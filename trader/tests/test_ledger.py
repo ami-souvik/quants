@@ -460,12 +460,26 @@ class TestCircuitBreakers:
         assert status.sector_cap_triggered is False
 
     def test_enforce_buy_blocked_on_drawdown(self):
+        """In MIS, a blocked BUY becomes SKIP — there is no HOLD."""
         status = CircuitBreakerStatus(drawdown_triggered=True)
         decision, rationale = enforce_decision("BUY", status)
-        assert decision == "HOLD"
+        assert decision == "SKIP"
         assert rationale == "DRAWDOWN"
 
+    def test_enforce_buy_blocked_on_concentration(self):
+        status = CircuitBreakerStatus(concentration_triggered=True)
+        decision, rationale = enforce_decision("BUY", status)
+        assert decision == "SKIP"
+        assert rationale == "CONCENTRATION"
+
+    def test_enforce_buy_blocked_on_sector_cap(self):
+        status = CircuitBreakerStatus(sector_cap_triggered=True)
+        decision, rationale = enforce_decision("BUY", status)
+        assert decision == "SKIP"
+        assert rationale == "SECTOR_CAP"
+
     def test_enforce_exit_passes_through(self):
+        """EXIT always passes through — needed to squareoff a restricted position."""
         status = CircuitBreakerStatus(drawdown_triggered=True)
         decision, rationale = enforce_decision("EXIT", status)
         assert decision == "EXIT"

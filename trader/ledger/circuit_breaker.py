@@ -1,12 +1,14 @@
 """
-Circuit breaker conditions for the paper-trading ledger.
+Circuit breaker conditions for the paper-trading ledger (MIS intraday).
 
-When a circuit breaker is active:
-- DRAWDOWN:      portfolio drawdown >= 10% → no new BUY entries
-- CONCENTRATION: any single position >= 15% of NAV → no adds to that position
-- SECTOR_CAP:    any sector >= 40% of NAV → no new entries in that sector
+When a circuit breaker is active, a pending BUY becomes SKIP (not HOLD — there
+is no HOLD concept in MIS; you either enter same-day or you don't).
+
+- DRAWDOWN:      intraday portfolio drawdown >= 5% of opening NAV → SKIP all new entries
+- CONCENTRATION: any single intraday position >= 15% of NAV → SKIP adds to that position
+- SECTOR_CAP:    any sector >= 40% of NAV → SKIP new entries in that sector
 - LLM_COST:      daily LLM spend > $1.00 → degrade to cheaper models (alert only here)
-- RESTRICTED:    ticker on NSE ASM/GSM/T2T list → force EXIT if holding
+- RESTRICTED:    ticker on NSE ASM/GSM/T2T list → block entry; force squareoff if open
 """
 from __future__ import annotations
 
@@ -131,19 +133,20 @@ def enforce_decision(
     Apply circuit-breaker rules to an agent decision.
 
     Returns (enforced_decision, rationale).
-    - BUY is overridden to HOLD if any buy-blocking breaker is active.
-    - EXIT/HOLD always pass through.
-    - RESTRICTED forces EXIT if holding, SKIP otherwise.
+    - BUY is overridden to SKIP if any buy-blocking breaker is active.
+      (MIS has no HOLD — you either enter same-day or you don't.)
+    - EXIT always passes through (needed to squareoff a restricted position).
+    - RESTRICTED forces EXIT (squareoff any open intraday position immediately).
     """
     if cb_status.restricted_triggered:
         return "EXIT", "RESTRICTED"
 
     if decision == "BUY" and cb_status.blocks_new_buy:
         if cb_status.drawdown_triggered:
-            return "HOLD", "DRAWDOWN"
+            return "SKIP", "DRAWDOWN"
         if cb_status.concentration_triggered:
-            return "HOLD", "CONCENTRATION"
+            return "SKIP", "CONCENTRATION"
         if cb_status.sector_cap_triggered:
-            return "HOLD", "SECTOR_CAP"
+            return "SKIP", "SECTOR_CAP"
 
     return decision, ""
