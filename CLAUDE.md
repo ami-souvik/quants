@@ -11,8 +11,9 @@ a personal-use, paper-trading, multi-agent LLM system for Indian equity markets 
 
 The system will:
 - Watch **15 large-cap Nifty 50 stocks** (list in §3)
-- Run **once daily at 17:00 IST** (after market close, news settled)
-- Use **5 LLM agents** that debate and produce a structured trade decision
+- Run **once daily at 08:45 IST** (before market open — decisions ready at the 09:15 bell)
+- Use **5 LLM agents** that debate and produce a structured intraday trade decision
+- **All positions squared off by 15:15 IST the same day** — no overnight holdings ever
 - Record all decisions in a **paper-trading ledger** (no real money yet)
 - Display everything in a **Next.js dashboard**
 - Run on **AWS** with full **Terraform IaC**
@@ -20,6 +21,13 @@ The system will:
 
 This is **Phase 1: Paper Trading** (Month 1). No real broker order placement.
 After 30 days of validated paper performance, we graduate to Phase 2 (live Zerodha).
+
+**Key intraday constraints that cascade through the entire codebase:**
+- Product type: MIS (Margin Intraday Square-off) exclusively — never CNC
+- Entry window: 09:15–11:00 IST (first 105 min; avoids opening auction chaos and late-day illiquidity)
+- Mandatory square-off: simulate exit at 15:15 IST close price regardless of P&L
+- No overnight positions: at end of each simulated day, all positions are zero
+- Round-trip cost: ~11–13 bps (MIS) vs ~26–28 bps (CNC) — the key reason for the pivot
 
 **Tech stack I own:**
 - Languages: Python, TypeScript/JavaScript
@@ -45,13 +53,13 @@ agentic-trading/
 ├── README.md                        # Auto-generate with setup steps
 ├── .env.example                     # All env vars (never .env in git)
 ├── .gitignore
-├── pyproject.toml                   # Project metadata + all dependencies (PEP 517/518)
 ├── docker-compose.yml               # Local dev: FastAPI + Redis
 │
 ├── trader/                          # Core Python backend
 │   ├── __init__.py
 │   ├── main.py                      # FastAPI app entry point
-│   ├── daily_run.py                 # Entry point for ECS Fargate scheduled task
+│   ├── morning_run.py               # ECS entry point: decisions + simulated entries (08:45 IST)
+│   ├── squareoff_run.py             # ECS entry point: close all MIS positions + P&L (15:20 IST)
 │   │
 │   ├── config/
 │   │   ├── __init__.py
@@ -60,7 +68,7 @@ agentic-trading/
 │   │
 │   ├── ingestion/
 │   │   ├── __init__.py
-│   │   ├── market_data.py           # jugaad-data + nselib: EOD OHLC, bhavcopy
+│   │   ├── market_data.py           # jugaad-data + nselib: prior-day OHLC, bhavcopy, premarket data
 │   │   ├── news.py                  # NSE/BSE RSS, Moneycontrol RSS, ET Markets RSS
 │   │   ├── reddit.py                # r/IndianStockMarket, r/IndianStreetBets
 │   │   ├── corporate_actions.py     # NSE announcements, results calendar
@@ -109,7 +117,7 @@ agentic-trading/
 │   ├── api/
 │   │   ├── __init__.py
 │   │   ├── routes/
-│   │   │   ├── positions.py
+│   │   │   ├── trades.py            # Completed intraday round-trips + live positions (Redis)
 │   │   │   ├── decisions.py
 │   │   │   ├── metrics.py
 │   │   │   └── health.py
@@ -130,10 +138,11 @@ agentic-trading/
 │   │   ├── page.tsx                 # Main dashboard
 │   │   ├── decisions/page.tsx       # Decision log viewer
 │   │   ├── metrics/page.tsx         # Performance vs benchmarks
+│   │   ├── logs/page.tsx            # Daily run log viewer (date filter)
 │   │   └── how-it-works/page.tsx    # Visual system architecture explainer
 │   ├── components/
 │   │   ├── NavChart.tsx             # NAV vs Nifty 50 line chart (Recharts)
-│   │   ├── PositionsTable.tsx
+│   │   ├── DailyTradesTable.tsx     # Today's intraday trades + realised P&L
 │   │   ├── DecisionCard.tsx         # Per-stock agent debate viewer
 │   │   ├── AgentCostWidget.tsx      # Daily LLM cost tracker
 │   │   └── CircuitBreakerBanner.tsx
@@ -181,15 +190,16 @@ AWS_REGION=ap-south-1
 AWS_ACCESS_KEY_ID=
 AWS_SECRET_ACCESS_KEY=
 S3_BUCKET_NAME=nse-llm-trader-archive
-DYNAMO_TABLE_NAME=nse_trader
+DYNAMO_TABLE_PREFIX=nse_trader_
 
 # App
 PAPER_TRADING_MODE=true          # CRITICAL: true = no real orders ever placed
 INITIAL_CAPITAL_INR=1000000      # ₹10 lakh paper capital
-MAX_POSITION_PCT=0.15            # 15% NAV max per stock
-MAX_OPEN_POSITIONS=5
-MAX_HOLD_DAYS=5
-CIRCUIT_BREAKER_DRAWDOWN=0.10   # 10% portfolio drawdown → pause entries
+MAX_POSITION_PCT=0.15            # 15% NAV max per stock per intraday trade
+MAX_OPEN_POSITIONS=5             # Max concurrent intraday positions
+SQUAREOFF_TIME_IST=15:15        # Hard square-off time; no exceptions
+ENTRY_CUTOFF_TIME_IST=11:00     # No new entries after this time
+CIRCUIT_BREAKER_DRAWDOWN=0.05   # 5% daily drawdown → halt new entries (tighter for intraday)
 DAILY_LLM_BUDGET_USD=1.00       # Alert if exceeded
 
 # Redis
@@ -235,11 +245,12 @@ UNIVERSE = [
 Build these functions using `jugaad-data` and `nselib`:
 
 ```python
-def fetch_eod_ohlcv(ticker: str, days: int = 30) -> pd.DataFrame:
+def fetch_prior_day_ohlcv(ticker: str, days: int = 30) -> pd.DataFrame:
     """
     Returns DataFrame with columns: date, open, high, low, close, volume
-    Uses jugaad-data NSEHistory. Handles weekends/holidays automatically.
-    Caches in Redis with TTL=23h (refresh only after market close).
+    Uses jugaad-data NSEHistory for the PRIOR trading day's data.
+    Run at 08:45 IST — today's data is not yet available.
+    Caches in Redis with TTL=6h (sufficient for morning run).
     """
 
 def fetch_bhavcopy(date: date) -> pd.DataFrame:
@@ -251,7 +262,7 @@ def fetch_bhavcopy(date: date) -> pd.DataFrame:
 
 def compute_technical_indicators(df: pd.DataFrame) -> dict:
     """
-    Input: 30-day OHLCV DataFrame
+    Input: 30-day prior-day OHLCV DataFrame (no same-day data at 08:45 IST)
     Output dict with:
       - rsi_14: float
       - sma_5, sma_20, sma_50: float
@@ -262,8 +273,12 @@ def compute_technical_indicators(df: pd.DataFrame) -> dict:
       - adx_14: float
       - vwap_today: float
       - pct_change_1d, 5d, 20d: float
-      - volume_ratio: float  (today vol / 20d avg vol)
+      - volume_ratio: float  (yesterday vol / 20d avg vol)
+      - prev_day_range_pct: float  (prev High-Low / prev Close × 100) — intraday range predictor
+      - overnight_gap_pct: float   (today's indicative open vs yesterday's close, if available)
     Use pandas-ta library. No external paid data.
+    Intraday note: VWAP and real-time RSI cannot be computed pre-market — agents must work
+    from prior-day closes and use gap/range as proxies for intraday volatility expectation.
     """
 
 def fetch_nifty50_index(days: int = 30) -> pd.DataFrame:
@@ -485,12 +500,16 @@ def get_news_window_tag(published_at: datetime) -> str:
     Implements Kirtac & Germano (2024) execution timing rules mapped to IST.
     NSE market hours: pre-open 09:00–09:15; session 09:15–15:30.
 
-    - Before 09:00 IST  → "PRE_OPEN"    (news settled; trade at today's open 09:15)
-    - 09:00–15:30 IST   → "INTRADAY"    (during session; trade at today's close, exit tomorrow close)
-    - After 15:30 IST   → "AFTER_CLOSE" (post-market; trade at tomorrow's open 09:15)
+    For intraday MIS trades, only pre-market news is actionable at the 08:45 decision point.
+    News that broke during the prior session or after close may cause a gap at the open.
 
-    Returns: "PRE_OPEN" | "INTRADAY" | "AFTER_CLOSE"
+    - Before 09:00 IST today       → "PRE_OPEN"          (fresh; highest signal for gap-open play)
+    - 09:00–15:30 IST prior day    → "PREV_INTRADAY"      (partially priced; moderate signal)
+    - 15:30 IST to midnight prior  → "PREV_AFTER_CLOSE"   (may cause gap open; high signal)
+
+    Returns: "PRE_OPEN" | "PREV_INTRADAY" | "PREV_AFTER_CLOSE"
     All datetimes must be IST-aware (Asia/Kolkata).
+    For the 08:45 morning run, set hours_back=18 to capture all post-close news.
     """
 ```
 
@@ -525,10 +544,9 @@ def fetch_fii_dii_flows(date: date) -> dict:
 Verify all numbers against Zerodha's published calculator.
 
 ```python
-@dataclass
 class TradeType(Enum):
-    DELIVERY = "CNC"    # T+1 settlement; up to 5 days
-    INTRADAY = "MIS"    # Same-day square-off
+    INTRADAY = "MIS"    # Same-day square-off — ONLY mode in Phase 1
+    # CNC (delivery) is explicitly forbidden in Phase 1. Do not add it.
 
 @dataclass
 class CostBreakdown:
@@ -538,7 +556,7 @@ class CostBreakdown:
     gst: float
     sebi_fee: float
     stamp_duty: float
-    dp_charges: float   # Only on delivery SELL; ₹15.93 fixed per scrip per day
+    # dp_charges removed: ₹0 for MIS — no DP charge on intraday trades
     total: float
     total_bps: float    # total / trade_value * 10000
 
@@ -551,16 +569,7 @@ def calculate_trade_cost(
     """
     Exact charges for 2025-2026:
 
-    DELIVERY (CNC):
-      Brokerage: ₹0 (Zerodha delivery is free)
-      STT: 0.1% on BUY + 0.1% on SELL
-      NSE txn charge: 0.00297% (both sides)
-      GST: 18% on (brokerage + txn + SEBI)
-      SEBI fee: ₹10 per crore = 0.0001%
-      Stamp duty: 0.015% on BUY only
-      DP charges: ₹15.93 on SELL only
-
-    INTRADAY (MIS):
+    INTRADAY (MIS) — ONLY trade type in Phase 1:
       Brokerage: min(₹20, 0.03%) per order
       STT: 0.025% on SELL only
       NSE txn charge: 0.00297% (both sides)
@@ -569,16 +578,25 @@ def calculate_trade_cost(
       Stamp duty: 0.003% on BUY only
       DP charges: ₹0
 
-    Round-trip delivery benchmark: ~25.5–28 bps
-    Round-trip intraday benchmark:  ~10.6–13 bps
+    Round-trip MIS benchmark: ~10.6–13 bps (2.5× cheaper than delivery)
+    Cost breakdown for ₹50,000 intraday round-trip:
+      Brokerage: ₹30.15 (₹15 buy + ₹15.15 sell, 0.03% each capped at ₹20)
+      STT: ₹12.50 (0.025% on sell only)
+      NSE txn: ₹2.99 (0.00297% both sides)
+      GST: ₹5.97 (18% on brokerage + txn + SEBI)
+      SEBI: ₹0.01
+      Stamp: ₹1.50 (0.003% on buy only)
+      DP charges: ₹0 (zero for MIS)
+      Total: ~₹53 → ~10.6 bps
 
     Include 3 bps slippage buffer for large-cap NSE stocks.
+    Effective hurdle rate for a trade to be worthwhile: >13–16 bps expected move.
     """
 
 def worked_example_test():
     """
-    Unit test: ₹50,000 delivery buy → sell.
-    Expected: total ~₹127–135. Run on module import in test mode.
+    Unit test: ₹50,000 MIS intraday buy → sell same day.
+    Expected: total ~₹53–60 (10.6–12 bps). Run on module import in test mode.
     """
 ```
 
@@ -604,11 +622,13 @@ This is a PERSONAL, NON-COMMERCIAL, PAPER-TRADING experiment. No real money is a
 - Paper capital: ₹10,00,000 (₹10 lakh)
 - Max position size: 15% of NAV per stock
 - Max simultaneous open positions: 5
-- Max hold duration: 5 trading days
-- Trade type: equity delivery (CNC) — NO intraday squared positions in Phase 1
-- Round-trip cost assumption: 28 bps (delivery, realistic Indian charges)
+- Trade type: equity intraday MIS ONLY — all positions squared off by 15:15 IST same day
+- No overnight holdings: every simulated day ends with zero open positions
+- Entry window: 09:15–11:00 IST only — no new entries after 11:00 IST
+- Mandatory square-off: simulate closing all open positions at 15:15 IST market price
+- Round-trip cost assumption: 13 bps (MIS intraday, realistic Indian charges)
 - Circuit limits: reject any trade if the stock is locked at upper/lower circuit
-- ASM/GSM: never enter/hold stocks on NSE ASM, GSM, or T2T lists
+- ASM/GSM: never enter stocks on NSE ASM, GSM, or T2T lists
 - Market hours (IST): pre-open 09:00–09:15; session 09:15–15:30; closed otherwise
 
 ## Output discipline
@@ -623,7 +643,8 @@ This is a PERSONAL, NON-COMMERCIAL, PAPER-TRADING experiment. No real money is a
 - Results season: Q1 (Aug), Q2 (Nov), Q3 (Feb), Q4 (May/Jun) — elevated volatility
 - RBI policy dates: bi-monthly MPC meetings — macro risk events
 - Budget: Union Budget (Feb 1) — sector-level shock potential
-- STT increase (Budget 2024, eff. Oct 2024): delivery 0.1%/0.1%, intraday sell 0.025%
+- STT for MIS intraday: 0.025% on SELL side only (no buy-side STT for intraday)
+- STT increase (Budget 2024, eff. Oct 2024) applies to F&O; equity MIS STT unchanged at 0.025%
 - Currency: USD/INR heavily influences IT sector (TCS, INFY)
 - Sector correlations: Banking stocks move together on RBI/NPA news
 ```
@@ -645,9 +666,9 @@ You are the News & Sentiment Analyst. Your sole job: analyse news about {ticker}
 - price_change_1d: {pct_1d}%
 
 ## What to assess
-1. Sentiment polarity: is the NEWS flow bullish, bearish, or neutral for this stock over 1–5 days?
+1. Sentiment polarity: is the NEWS flow bullish, bearish, or neutral for THIS DAY'S intraday session?
 2. Key events: any results, management change, regulatory action, sector news?
-3. News timing window: {news_window_tag} — affects when a trade can open
+3. News timing window: {news_window_tag} — PRE_OPEN and PREV_AFTER_CLOSE news is highest signal for gap-open intraday plays
 4. News quality: is this rumour, confirmed fact, or forward guidance?
 5. Contamination check: flag if news is older than 48h or seems repetitive
 
@@ -657,7 +678,7 @@ You are the News & Sentiment Analyst. Your sole job: analyse news about {ticker}
   "sentiment_score": 0.72,        // 0.0=very bearish, 0.5=neutral, 1.0=very bullish
   "sentiment_label": "BULLISH",   // BULLISH | SLIGHTLY_BULLISH | NEUTRAL | SLIGHTLY_BEARISH | BEARISH
   "key_events": ["Q4 net profit beat consensus by 8%", "New refinery capex announced"],
-  "news_window": "AFTER_CLOSE",   // PRE_OPEN | INTRADAY | AFTER_CLOSE
+  "news_window": "PREV_AFTER_CLOSE",  // PRE_OPEN | PREV_INTRADAY | PREV_AFTER_CLOSE
   "data_quality": "HIGH",         // HIGH | MEDIUM | LOW | STALE
   "confidence": 0.78,
   "reasoning": "Two sentences max explaining the score."
@@ -671,32 +692,34 @@ You are the News & Sentiment Analyst. Your sole job: analyse news about {ticker}
 ```markdown
 # PROMPT: prompts/technical.md
 
-You are the Technical Analyst. Assess price/momentum signals for {ticker} over a 1–5 day horizon.
+You are the Technical Analyst. Assess price/momentum signals for {ticker} for TODAY'S intraday session only. All positions are squared off by 15:15 IST. Your horizon is hours, not days.
 
 ## Input
 - ticker: {ticker} ({company_name})
 - indicators: {rsi_14, sma_5, sma_20, sma_50, macd, macd_signal, bb_upper, bb_mid, bb_lower, atr_14, adx_14, volume_ratio, pct_change_1d, pct_change_5d, pct_change_20d, vwap_today}
 - last_5d_ohlcv: [{date, open, high, low, close, volume}]
-- current_position: {side: null|"LONG", qty: int, avg_price: float, days_held: int}
+- current_position: {side: null|"LONG", qty: int, avg_price: float}  # No days_held — all MIS, always same day
 
 ## What to assess
 1. Trend: is price above/below key MAs? Trending or ranging? (ADX > 25 = trending)
 2. Momentum: RSI overbought (>70) / oversold (<30)? MACD crossover?
 3. Volatility: ATR-based position sizing suggestion (risk ≤ 1% of portfolio per trade)
 4. Volume confirmation: above-average volume validates breakouts/breakdowns
-5. For held positions: should we exit? (price vs entry, trailing stop logic)
+5. Intraday range prediction: use prev_day_range_pct and ATR to estimate today's likely High–Low range — helps set realistic intraday targets and stops
 
 ## Output schema
 {
   "ticker": "TCS",
-  "technical_signal": "BUY",    // BUY | SELL | HOLD | EXIT_LONG
-  "trend": "UPTREND",           // UPTREND | DOWNTREND | RANGING
-  "momentum": "OVERSOLD",       // OVERBOUGHT | NEUTRAL | OVERSOLD
-  "suggested_stop_loss_pct": 2.5, // % below entry for stop loss
-  "suggested_target_pct": 5.0,  // % above entry for target
-  "volume_signal": "ABOVE_AVG", // ABOVE_AVG | AVERAGE | BELOW_AVG | DIVERGENT
+  "technical_signal": "BUY",       // BUY | SHORT | SKIP  (no HOLD — intraday is binary: trade or skip)
+  "intraday_bias": "GAP_UP_CONTINUATION",  // GAP_UP_CONTINUATION | GAP_DOWN_FADE | RANGE_PLAY | NO_SIGNAL
+  "momentum": "OVERSOLD",          // OVERBOUGHT | NEUTRAL | OVERSOLD
+  "suggested_entry_zone": "2840–2855",     // price range for simulated entry (first 15 min)
+  "suggested_stop_loss_pct": 0.5,  // % below entry — tight for intraday (0.3–1.0% typical)
+  "suggested_target_pct": 1.2,     // % above entry — realistic intraday target
+  "expected_range_pct": 1.8,       // predicted High–Low range for today based on ATR + prev range
+  "volume_signal": "ABOVE_AVG",    // ABOVE_AVG | AVERAGE | BELOW_AVG | DIVERGENT
   "confidence": 0.65,
-  "reasoning": "Two sentences max."
+  "reasoning": "Two sentences max. Focus on gap, range, and momentum for today only."
 }
 ```
 
@@ -722,7 +745,7 @@ You are the Fundamentals Analyst. Assess the fundamental health and valuation co
 2. Institutional signal: FII buying = bullish for large-caps; FII selling = bearish
 3. Macro fit: does macro environment (RBI, USD/INR, Nifty trend) favour this sector?
 4. Quality check: any red flags (high debt, promoter pledge, audit issues)?
-5. 1–5 day fundamental catalyst: any expected event (results, analyst day, policy)?
+5. Intraday catalyst: any event expected TODAY that could move the stock intraday (results announcement, RBI policy, analyst call, expiry day F&O dynamics)?
 
 ## Output schema
 {
@@ -754,8 +777,8 @@ Both researchers have read the outputs from the News, Technical, and Fundamental
 - fundamentals_agent: {fundamentals_agent_output}
 
 ## Debate rules
-- BULL argues why this stock will rise 1–5% over the next 1–5 trading days
-- BEAR argues why this stock will fall or underperform over the same window
+- BULL argues why this stock will rise 0.5–2% INTRADAY TODAY (squared off by 15:15 IST)
+- BEAR argues why this stock will fall or stay flat intraday today
 - Each makes their STRONGEST possible case — no strawmanning
 - Both must address the HIGHEST-CONFIDENCE signal from the opposing side
 - Each is limited to 3 bullet points
@@ -775,7 +798,7 @@ Both researchers have read the outputs from the News, Technical, and Fundamental
   ],
   "debate_winner": "BULL",      // BULL | BEAR | DRAW — who made the stronger case?
   "conviction_delta": 0.15,     // How much does the winner's case dominate? 0.0–1.0
-  "key_risk": "If Nifty falls >1.5% tomorrow, this long is immediately wrong.",
+  "key_risk": "If Nifty falls >0.8% in the first hour, this intraday long is immediately wrong.",
   "confidence": 0.60
 }
 ```
@@ -800,40 +823,43 @@ This is a paper-trading simulation on a ₹10 lakh portfolio.
 ## Current portfolio state
 - cash_available_inr: {cash_available}
 - open_positions: {open_positions_count} / 5 max
-- ticker_current_position: {position_qty} shares @ avg ₹{avg_price}, held {days_held} days
-- portfolio_drawdown_pct: {drawdown_pct}%  (circuit breaker if >= 10%)
+- ticker_current_position: {position_qty} shares @ avg ₹{avg_price}  # no days_held — MIS always closes same day
+- portfolio_daily_drawdown_pct: {drawdown_pct}%  (circuit breaker if >= 5% today)
 - nav_today: ₹{nav}
 
 ## Decision constraints (hard rules — never violate)
 1. PAPER_TRADING_MODE = true. This generates a SIMULATED order only. Never place real orders.
-2. Max 15% NAV per position → max buy value = ₹{max_position_value}
-3. Max 5 simultaneous positions — if already at 5, only HOLD or EXIT allowed
-4. If portfolio drawdown >= 10%: only EXIT decisions allowed, no new BUY
+2. Max 15% NAV per intraday position → max trade value = ₹{max_position_value}
+3. Max 5 simultaneous intraday positions — if already at 5, only SKIP allowed (no HOLD concept)
+4. If daily drawdown >= 5%: STOP all new entries for the rest of the day
 5. Never trade stocks on NSE ASM/GSM/T2T lists (check input flag: {is_restricted})
-6. Minimum conviction threshold: confidence >= 0.55 to place a BUY; EXIT if confidence < 0.40
-7. Cost hurdle: expected move must exceed 28 bps (delivery round-trip cost) to be worthwhile
+6. Entry time gate: if current_time_ist > 11:00, output SKIP — no new intraday entries
+7. Minimum conviction threshold: confidence >= 0.60 to enter (higher bar than delivery — intraday is binary)
+8. Cost hurdle: expected intraday move must exceed 13 bps (MIS round-trip) — realistic minimum is 0.3%
 
 ## Output schema (MUST be exact — validated by Pydantic)
 {
   "ticker": "ICICIBANK",
-  "decision": "BUY",              // BUY | SELL | HOLD | EXIT | SKIP
-  "decision_rationale": "SKIP",   // Only populated if SKIP: "QUIET", "RESTRICTED", "BUDGET", "DRAWDOWN"
-  "quantity_shares": 35,          // 0 if HOLD/SKIP; negative not allowed (no shorting in Phase 1)
+  "decision": "BUY",              // BUY | SKIP  (no HOLD — intraday is enter or don't enter)
+  "direction": "LONG",            // LONG only in Phase 1 (no shorting)
+  "skip_reason": null,            // "QUIET" | "RESTRICTED" | "TIME_CUTOFF" | "DRAWDOWN" | "LOW_CONFIDENCE" | null
+  "quantity_shares": 35,
   "estimated_trade_value_inr": 87500.0,
-  "product_type": "CNC",          // CNC (delivery) always in Phase 1
-  "horizon_days": 3,              // 1–5 days
-  "target_price": 2620.0,         // 0 if HOLD/SKIP
-  "stop_loss_price": 2480.0,      // 0 if HOLD/SKIP
-  "confidence": 0.72,             // 0.0–1.0
-  "primary_thesis": "Oversold RSI + Q4 beat not yet priced in; FII accumulating Banking sector.",
-  "kill_conditions": [
-    "Close below 200DMA",
-    "Nifty falls >2% intraday",
-    "Negative RBI announcement"
+  "product_type": "MIS",          // ALWAYS MIS — never CNC
+  "entry_window": "09:15–09:30",  // suggested entry time window (first 15 min preferred)
+  "squareoff_time": "15:15",      // always 15:15 IST — hard coded
+  "target_price": 2538.0,        // realistic intraday target (~0.8–1.5% from entry)
+  "stop_loss_price": 2492.0,     // tight intraday stop (~0.3–0.6% from entry)
+  "confidence": 0.72,
+  "primary_thesis": "Gap-up open expected on strong Q4 beat + FII inflows; fade likely after 11am.",
+  "intraday_exit_triggers": [
+    "Nifty drops >0.8% from open",
+    "Stock fails to break ₹2510 within 30 min",
+    "Volume dries up below 0.5× average by 10:30"
   ],
-  "agent_agreement": "HIGH",      // HIGH | MEDIUM | LOW (based on News/Tech/Fund alignment)
-  "estimated_cost_bps": 28.5,
-  "risk_reward_ratio": 2.1        // target_pct / stop_loss_pct
+  "agent_agreement": "HIGH",
+  "estimated_cost_bps": 13.0,
+  "risk_reward_ratio": 2.0        // target_pct / stop_loss_pct — minimum 1.5 to enter
 }
 ```
 
@@ -853,9 +879,10 @@ class TickerState(TypedDict):
     news_articles: list[dict]
     corporate_actions: list[dict]
     fii_dii: dict
-    current_position: dict
+    current_position: dict | None  # Sourced from Redis: {qty, avg_price} or None if flat
     portfolio_snapshot: dict
     is_restricted: bool        # ASM/GSM/T2T check
+    entry_cutoff_passed: bool  # True if current time > 11:00 IST — skip pipeline
     # Agent outputs (filled sequentially)
     news_output: dict | None
     technical_output: dict | None
@@ -877,27 +904,40 @@ class DailyRunState(TypedDict):
     completed_at: str | None
 ```
 
-Graph flow per ticker:
+Graph flow per ticker (runs at 08:45 IST before market open):
 ```
 START
   → [check_restrictions]      # Is ticker on ASM/GSM/T2T? → skip if yes
-  → [check_quiet]             # No news + <1.5% move? → skip if true
+  → [check_entry_cutoff]      # Is time > 11:00 IST? → skip (safety net only; 08:45 run never hits this)
+  → [check_quiet]             # No overnight news + prev-day move <0.8%? → skip if true
   → [news_sentiment_agent]
   → [technical_agent]
   → [fundamentals_agent]
   → [bull_bear_agent]
-  → [portfolio_manager_agent]  # Retry logic + self-consistency
+  → [portfolio_manager_agent]  # Retry logic + self-consistency (3 samples, majority vote)
   → [cost_guard]               # If daily LLM spend > $1, alert + degrade to cheaper model
-  → [ledger_execute]           # Paper-trade fill simulation
+  → [ledger_execute]           # Simulate BUY fill at 09:20 IST open price (proxy)
+  → [squareoff_schedule]       # Register 15:15 IST auto square-off in Redis
   → [persist_to_dynamo]
   → [archive_to_s3]
 END
+
+Separate process — runs at 15:20 IST (after market close):
+  → [squareoff_all_positions]  # Pull all open simulated positions from Redis
+                               # Simulate SELL fill at 15:15 IST close price
+                               # Calculate intraday P&L per trade
+                               # Update nav_daily in DynamoDB
+                               # Archive completed trades to S3
 ```
 
 Run all 15 tickers **sequentially** (not parallel) in Phase 1 to:
 - Stay within LLM rate limits
 - Keep total daily LLM cost observable
 - Avoid Redis race conditions
+
+**Two EventBridge triggers required:**
+1. Morning run: `cron(15 3 ? * MON-FRI *)` = 08:45 IST (decisions + simulated entries)
+2. Square-off run: `cron(50 9 ? * MON-FRI *)` = 15:20 IST (closes all positions, computes P&L)
 
 ---
 
@@ -908,103 +948,73 @@ Run all 15 tickers **sequentially** (not parallel) in Phase 1 to:
 ```python
 class PaperTradingLedger:
     """
-    Simulates realistic trade execution for CNC delivery positions.
+    Simulates realistic intraday MIS trade execution.
     All fills are SIMULATED — no broker API called in Phase 1.
+    Every position is guaranteed to be closed by end of day.
     """
 
     def simulate_fill(self, decision: PMDecision, market_data: dict) -> SimulatedFill:
         """
-        Fill logic:
-        - BUY: fill at previous day's CLOSE price (next-day open not available at 17:00 IST)
-        - EXIT: fill at previous day's CLOSE price
-        - Apply 3 bps slippage on top (conservative Nifty 50 estimate)
-        - Calculate cost via cost_model.calculate_trade_cost()
-        - Return SimulatedFill with fill_price, actual_cost_inr, cost_bps
+        Fill logic for intraday MIS:
+        - BUY entry: fill at prior day's CLOSE + 0.1% (proxy for next-day open after gap)
+          Apply 3 bps slippage on top.
+        - SELL square-off: fill at that day's 15:15 IST closing price from bhavcopy
+          Apply 3 bps slippage on the exit leg too.
+        - Calculate cost via cost_model.calculate_trade_cost(TradeType.INTRADAY)
+        - Return SimulatedFill with entry_price, exit_price, gross_pnl, net_pnl, cost_bps
         """
 
-    def update_positions(self, fill: SimulatedFill) -> dict:
+    def open_intraday_position(self, fill: SimulatedFill) -> dict:
         """
-        Updates position in DynamoDB.
-        Enforces: max 5 positions, max 15% NAV per stock.
-        Auto-exits positions held > MAX_HOLD_DAYS.
+        Opens an intraday position in Redis (not DynamoDB — positions are ephemeral, same-day only).
+        Enforces: max 5 concurrent intraday positions, max 15% NAV per stock.
+        Writes to DynamoDB only after square-off when final P&L is known.
         """
 
-    def calculate_nav(self) -> dict:
+    def squareoff_all_positions(self, closing_prices: dict[str, Decimal]) -> list[dict]:
         """
-        NAV = cash + sum(position_qty × current_price for each position)
-        Returns {nav, cash, equity_value, daily_return_pct, drawdown_pct}
+        Called at 15:20 IST. Reads all open positions from Redis.
+        For each position: simulate SELL at closing_prices[ticker] with 3 bps slippage.
+        Computes gross P&L, net P&L (after all MIS costs), and writes completed trades to DynamoDB.
+        Clears Redis position store. Returns list of completed trade records.
+        """
+
+    def calculate_nav(self, intraday: bool = False) -> dict:
+        """
+        During day (intraday=True): NAV = cash + unrealized mark-to-market on open MIS positions
+        End of day (intraday=False): NAV = cash only (all positions squared off → zero equity_value)
+        Returns {nav, cash, equity_value, daily_return_pct, cumulative_return_pct, drawdown_pct}
+        Intraday note: NAV fluctuates during session but always resets to cash-only at EOD.
         """
 
     def check_circuit_breakers(self) -> CircuitBreakerStatus:
         """
         Returns which circuit breakers are active:
-        - DRAWDOWN: portfolio drawdown >= 10% → no new entries
-        - CONCENTRATION: any position >= 15% NAV → no adds
-        - SECTOR_CAP: any sector >= 40% NAV → no adds in that sector
+        - DAILY_DRAWDOWN: today's realised + unrealised loss >= 5% of opening NAV → halt all new entries
+        - CONCENTRATION: any single intraday position >= 15% NAV → reject new entry for that ticker
+        - SECTOR_CAP: any sector >= 40% of open intraday positions → reject new entries in that sector
         - LLM_COST: daily LLM cost > $1 → switch to cheaper models
-        - RESTRICTED: ticker on ASM/GSM/T2T list → force EXIT
+        - RESTRICTED: ticker on ASM/GSM/T2T list → reject entry
         """
 ```
 
 ---
 
-## 9. DYNAMODB SCHEMA — SINGLE-TABLE DESIGN
+## 9. DYNAMODB SCHEMAS
 
-One master table: `nse_trader` (configured via `DYNAMO_TABLE_NAME` env var).
-All four entity types live in this table, separated by PK/SK prefix conventions.
-On-demand billing. No provisioned capacity. TTL enabled on all items (30-day auto-expiry).
-
-Every item carries a `type` attribute for readability and future filtering.
-
-### Key design
-
-| Entity    | PK                    | SK                                    | type         |
-|-----------|-----------------------|---------------------------------------|--------------|
-| Position  | `TICKER#{symbol}`     | `DATE#{yyyy-mm-dd}`                   | `POSITION`   |
-| Decision  | `DATE#{yyyy-mm-dd}`   | `TICKER#{symbol}#AGENT#{agent_name}`  | `DECISION`   |
-| Trade     | `DATE#{yyyy-mm-dd}`   | `TRADE#{uuid}`                        | `TRADE`      |
-| NAV       | `DATE#{yyyy-mm-dd}`   | `PORTFOLIO`                           | `NAV`        |
-
-### Access patterns (all satisfied without a GSI in Phase 1)
-
-| Query                                  | Operation                                              |
-|----------------------------------------|--------------------------------------------------------|
-| Position for one ticker on a date      | `GetItem` PK=`TICKER#X` SK=`DATE#Y`                   |
-| All positions today (15 tickers)       | 15 × `GetItem` (acceptable for fixed 15-stock universe)|
-| All agent decisions for a date         | `Query` PK=`DATE#X` SK begins_with `TICKER#`          |
-| One agent's decision for ticker+date   | `GetItem` PK=`DATE#X` SK=`TICKER#X#AGENT#Y`           |
-| All trades on a date                   | `Query` PK=`DATE#X` SK begins_with `TRADE#`           |
-| NAV for a date                         | `GetItem` PK=`DATE#X` SK=`PORTFOLIO`                  |
-| Idempotency check (daily run done?)    | `GetItem` PK=`DATE#X` SK=`PORTFOLIO` → None = not run |
-
-### Item schemas
+Create tables with prefix from `DYNAMO_TABLE_PREFIX` env var.
+All tables use on-demand billing mode. No provisioned capacity.
 
 ```python
-# ── POSITION ─────────────────────────────────────────────────────────────────
-# PK: TICKER#{symbol}  SK: DATE#{yyyy-mm-dd}
-{
-    "PK": "TICKER#RELIANCE",
-    "SK": "DATE#2026-05-26",
-    "type": "POSITION",
-    "qty": 20,
-    "avg_price": Decimal("2840.50"),
-    "entry_date": "2026-05-24",
-    "days_held": 2,
-    "product_type": "CNC",
-    "horizon_days": 3,
-    "stop_loss_price": Decimal("2750.00"),
-    "target_price": Decimal("2950.00"),
-    "kill_conditions": ["Close below 200DMA"],
-    "decision_date": "2026-05-24",
-    "ttl": 1780000000  # Auto-expire after 30 days
-}
+# No {PREFIX}positions table — intraday positions live in Redis during the day only.
+# Redis key pattern: INTRADAY_POS:{date}:{ticker}
+# Redis TTL: 24h (positions auto-expire; squareoff_all_positions clears them at 15:20 IST)
 
-# ── DECISION  (one row per agent per ticker per day) ──────────────────────────
+# Table: {PREFIX}decisions  (one row per agent per ticker per day)
 # PK: DATE#{yyyy-mm-dd}  SK: TICKER#{symbol}#AGENT#{agent_name}
 {
     "PK": "DATE#2026-05-26",
     "SK": "TICKER#RELIANCE#AGENT#PortfolioManager",
-    "type": "DECISION",
     "decision": "BUY",
     "confidence": Decimal("0.72"),
     "reasoning": "...",
@@ -1019,36 +1029,45 @@ Every item carries a `type` attribute for readability and future filtering.
     "ttl": 1780000000
 }
 
-# ── TRADE  (one row per simulated fill) ───────────────────────────────────────
+# Table: {PREFIX}trades  (one row per COMPLETED intraday round-trip — written at 15:20 IST)
 # PK: DATE#{yyyy-mm-dd}  SK: TRADE#{uuid}
 {
     "PK": "DATE#2026-05-26",
     "SK": "TRADE#abc123",
-    "type": "TRADE",
     "ticker": "RELIANCE",
-    "side": "BUY",
+    "product_type": "MIS",
     "qty": 20,
-    "fill_price": Decimal("2840.50"),
-    "trade_value_inr": Decimal("56810.00"),
-    "simulated_cost_inr": Decimal("162.72"),
-    "simulated_cost_bps": Decimal("28.6"),
-    "slippage_bps": Decimal("3.0"),
-    "product_type": "CNC",
-    "ledger_cash_after": Decimal("430000.00"),
+    "entry_price": Decimal("2841.00"),   # simulated open fill (09:20 IST proxy)
+    "exit_price": Decimal("2878.50"),    # simulated square-off (15:15 IST close)
+    "entry_time_ist": "09:20",
+    "exit_time_ist": "15:15",
+    "gross_pnl_inr": Decimal("750.00"),  # (exit - entry) × qty
+    "total_cost_inr": Decimal("53.12"),  # all MIS charges round-trip
+    "net_pnl_inr": Decimal("696.88"),
+    "net_pnl_bps": Decimal("122.4"),     # net_pnl / (entry × qty) × 10000
+    "trade_value_inr": Decimal("56820.00"),
+    "cost_bps": Decimal("10.6"),
+    "slippage_bps": Decimal("6.0"),      # 3 bps entry + 3 bps exit
+    "was_squaredoff_auto": False,        # True if position hit stop or time-based auto-exit
+    "nav_after_inr": Decimal("1006969.00"),
     "ttl": 1780000000
 }
 
-# ── NAV  (one row per trading day) ────────────────────────────────────────────
+# Table: {PREFIX}nav_daily  (one row per trading day)
 # PK: DATE#{yyyy-mm-dd}  SK: PORTFOLIO
 {
     "PK": "DATE#2026-05-26",
     "SK": "PORTFOLIO",
-    "type": "NAV",
     "nav_inr": Decimal("1015000.00"),
     "cash_inr": Decimal("250000.00"),
-    "equity_value_inr": Decimal("765000.00"),
-    "open_positions": 3,
-    "daily_return_pct": Decimal("0.42"),
+    "equity_value_inr": Decimal("0.00"),      # Always 0 at EOD — all MIS squared off
+    "intraday_trades_count": 8,             # Total round-trips completed today
+    "intraday_wins": 5,
+    "intraday_losses": 3,
+    "gross_pnl_inr": Decimal("2850.00"),
+    "total_costs_inr": Decimal("424.96"),
+    "net_pnl_inr": Decimal("2425.04"),
+    "daily_return_pct": Decimal("0.24"),
     "cumulative_return_pct": Decimal("1.50"),
     "drawdown_pct": Decimal("-1.10"),
     "nifty50_close": Decimal("24210.55"),
@@ -1083,9 +1102,9 @@ def calculate_profit_factor(trade_pnls: list[float]) -> float:
 def calculate_per_agent_hit_rate(agent: str, date_range: tuple) -> dict:
     """
     For each agent, what % of its directional calls (BULLISH/BEARISH)
-    aligned with the actual 5-day realized return?
-    Pull from DynamoDB decisions table + nav_daily table.
-    Returns {hit_rate: float, n_calls: int, avg_confidence: float}
+    aligned with the actual SAME-DAY intraday realized P&L (positive = win, negative = loss)?
+    Pull from DynamoDB decisions table + trades table.
+    Returns {hit_rate: float, n_calls: int, avg_confidence: float, avg_net_pnl_bps: float}
     """
 ```
 
@@ -1093,11 +1112,11 @@ def calculate_per_agent_hit_rate(agent: str, date_range: tuple) -> dict:
 
 Build these 5 benchmarks. All start at ₹10,00,000 and are recomputed daily:
 
-1. **Nifty 50 TRI** — direct index return (use nselib for NIFTY_50 adjusted for dividends)
-2. **Equal-weighted basket** — equal ₹/15 allocation across all 15 tickers, rebalanced weekly
-3. **5-day momentum** — each Monday, buy top 5 by prior 5-day return; hold for the week
-4. **Mean-reversion** — each Monday, buy bottom 5 by prior 5-day return; hold for the week
-5. **Buy-and-hold** — equal allocation on Day 1, never touch
+1. **Nifty 50 daily return** — the index open-to-close return each day (most relevant intraday benchmark)
+2. **Random intraday** — simulate randomly picking 5 stocks each morning, entering at open, exiting at close — establishes the luck floor
+3. **Gap-follow naive** — buy top 5 gap-up stocks at open, exit at close — tests if simply following gaps beats the agents
+4. **Gap-fade naive** — buy top 5 gap-down stocks (mean-reversion), exit at close
+5. **Zero-trade baseline** — do nothing; NAV stays at ₹10L — tracks cost drag if system trades badly
 
 ---
 
@@ -1118,13 +1137,18 @@ GET /api/decisions?date=2026-05-26
     news_sentiment, technical_signal, fundamental_bias, debate_winner,
     estimated_cost_bps, risk_reward_ratio, actual_fill: {...}|null}]
 
-GET /api/positions
-→ [{ticker, qty, avg_price, days_held, current_price, unrealized_pnl_pct,
-    stop_loss_price, target_price, kill_conditions}]
+GET /api/trades/today
+→ [{ticker, entry_price, exit_price, qty, gross_pnl_inr, net_pnl_inr, net_pnl_bps,
+    was_win, cost_bps, was_squaredoff_auto}]
+
+GET /api/positions/live
+→ [{ticker, qty, entry_price, current_price, unrealized_pnl_inr, time_open_minutes}]
+   # Returns Redis state — only populated between 09:15 and 15:20 IST
 
 GET /api/health
-→ {status: "OK", last_run: "2026-05-26T17:05:32+05:30", paper_mode: true,
-   circuit_breakers_active: [], daily_llm_cost_usd: 0.087}
+→ {status: "OK", last_morning_run: "2026-05-26T08:45:12+05:30",
+   last_squareoff_run: "2026-05-26T15:20:08+05:30", paper_mode: true,
+   open_positions_count: 0, circuit_breakers_active: [], daily_llm_cost_usd: 0.087}
 ```
 
 All routes:
@@ -1144,9 +1168,10 @@ Build `dashboard/` as Next.js 14 App Router with TypeScript and Tailwind CSS.
 **`app/page.tsx` — Main Dashboard**
 - NAV vs Nifty 50 line chart (Recharts `LineChart`; two lines, 30-day window)
 - Today's stats: NAV, daily return %, drawdown %, LLM cost today
-- Open positions table (PositionsTable component)
-- Circuit breaker status banner (red if any active)
-- Last run timestamp + "Paper Trading Mode" badge
+- Today's completed trades table (DailyTradesTable — win/loss, net P&L per trade)
+- Live positions widget (shows open MIS positions between 09:15–15:20 IST; empty outside those hours)
+- Circuit breaker status banner (red if daily drawdown >= 5%)
+- Last morning run + last square-off timestamps + "Paper Trading Mode" badge
 
 **`app/decisions/page.tsx` — Decision Log**
 - Date picker (default: today)
@@ -1154,27 +1179,34 @@ Build `dashboard/` as Next.js 14 App Router with TypeScript and Tailwind CSS.
   - Final PM decision + confidence badge
   - All 5 agent outputs in a tab layout
   - Full debate (bull vs bear bullet points)
-  - Estimated vs realized return (filled in retrospectively at T+5)
+  - Estimated vs realized intraday P&L (filled in at 15:20 IST same day — no T+5 wait)
 
 **`app/metrics/page.tsx` — Performance Analytics**
 - Benchmark comparison chart: portfolio vs all 5 benchmarks
 - Key metrics table: Sharpe, Sortino, max drawdown, win rate, profit factor
 - Per-agent hit rate bar chart (which agents are contributing signal?)
 - LLM cost breakdown (pie chart by agent × model)
-- Statistical significance warning banner: "21 observations is not enough to claim alpha"
+- Intraday win-rate chart: daily win% over the 30-day run
+- Average net P&L per trade in bps (should exceed ~13 bps cost hurdle)
+- Statistical significance warning banner: "21 trading days × ~8 trades/day = ~168 observations. Marginally more meaningful than delivery, but still not enough to claim alpha."
+
+**`app/logs/page.tsx` — Run Log Viewer**
+- Date picker (default: today)
+- Displays raw structured log output from `morning_run.py` and `squareoff_run.py`
+- Useful for debugging pipeline failures and schema errors without opening CloudWatch
 
 **`app/how-it-works/page.tsx` — System Architecture Visual**
 A fully static explainer page for the entire system. Sections (keep in sync with actual implementation):
-1. **Daily Pipeline overview** — horizontal flow diagram: Data Ingestion → 5 LLM Agents → PM Decision → Paper Ledger → Persist → Dashboard
+1. **Daily Pipeline overview** — two-phase flow: Morning Run (08:45 IST) → entries; Square-off Run (15:20 IST) → exits + P&L
 2. **Data Sources** — 18 RSS feeds grouped by publisher (NSE 6, ET 6, Livemint 2, BS 4) + market data (jugaad-data/nselib) + deduplication note
-3. **Five-Agent Pipeline** — per-agent card showing: index, name, model (with escalation logic for PM), inputs, JSON output fields, role description; sequential arrow connectors; prompt caching and retry/fallback notes
-4. **Transaction Cost Model** — table of all Indian 2025-26 charges for CNC delivery vs MIS intraday; round-trip bps benchmarks; 28 bps cost hurdle explanation
-5. **Circuit Breakers & Safety Gates** — 6 breakers: Portfolio Drawdown ≥10%, LLM Cost >$1, Concentration Cap 15% NAV, Sector Cap 40% NAV, Restricted Ticker (ASM/GSM/T2T), Quiet Skip
-6. **Paper Ledger & Position Rules** — 4 key constraints (₹10L capital, 5 max positions, 15% NAV cap, 5-day max hold); fill simulation at prior-day close + 3 bps slippage; CNC-only note
-7. **AWS Infrastructure** — table of all services (ECS Fargate, EventBridge, DynamoDB, S3, Secrets Manager, CloudWatch, Redis, SNS) with purpose and detail; cost target <₹2,000/month
-8. **Phase Roadmap** — Phase 1 Paper Trading (active) vs Phase 2 Live Trading via Zerodha (future, unlocks after 30-day validation)
+3. **Five-Agent Pipeline** — per-agent card showing: index, name, model, inputs, JSON output fields, role; sequential connectors; prompt caching and retry/fallback notes
+4. **Transaction Cost Model** — MIS intraday charges only (CNC removed); round-trip ~11–13 bps; 13 bps cost hurdle explanation
+5. **Circuit Breakers & Safety Gates** — 5 breakers: Daily Drawdown ≥5%, LLM Cost >$1, Concentration Cap 15% NAV, Sector Cap 40% NAV, Restricted Ticker (ASM/GSM/T2T)
+6. **Paper Ledger & Position Rules** — MIS-only fills; entry window 09:15–11:00 IST; mandatory 15:15 IST square-off; Redis position store; no overnight holdings
+7. **AWS Infrastructure** — 3 DynamoDB tables (no positions table), two EventBridge crons (08:45 + 15:20 IST), ECS, S3, Redis, SNS
+8. **Phase Roadmap** — Phase 1 Paper Trading (active) vs Phase 2 Live Trading via Zerodha (future)
 
-> **IMPORTANT:** When any system behaviour listed above changes (new agent, different model, new circuit breaker, cost change, new infrastructure resource), update this section AND the corresponding section in `app/how-it-works/page.tsx` so the dashboard stays accurate.
+> **IMPORTANT:** When any system behaviour listed above changes (new agent, different model, new circuit breaker, cost change, new infrastructure resource), update this section AND `app/how-it-works/page.tsx` so the dashboard stays accurate.
 
 ### Design requirements
 - Dark mode by default (trading terminals are dark)
@@ -1191,10 +1223,9 @@ A fully static explainer page for the entire system. Sections (keep in sync with
 Create these resources:
 
 ```hcl
-# DynamoDB (4 tables, on-demand)
-resource "aws_dynamodb_table" "positions" { ... }
+# DynamoDB (3 tables, on-demand — no positions table; intraday positions live in Redis)
 resource "aws_dynamodb_table" "decisions" { ... }
-resource "aws_dynamodb_table" "trades" { ... }
+resource "aws_dynamodb_table" "trades" { ... }   # completed round-trips written at 15:20 IST
 resource "aws_dynamodb_table" "nav_daily" { ... }
 
 # S3 (raw data archive + decision logs)
@@ -1212,16 +1243,20 @@ resource "aws_ecr_repository" "trader" { }
 
 # ECS Cluster + Task Definition (Fargate, 1 vCPU, 2 GB)
 resource "aws_ecs_cluster" "trader" { }
-resource "aws_ecs_task_definition" "daily_run" {
+resource "aws_ecs_task_definition" "morning_run" {
   # Image from ECR
-  # Command: ["python", "-m", "trader.daily_run"]
+  # Command: ["python", "-m", "trader.morning_run"]
   # Env vars from Secrets Manager
   # CPU: 1024, Memory: 2048
 }
 
-# EventBridge rule: 17:00 IST Mon–Fri = 11:30 UTC Mon–Fri
-resource "aws_cloudwatch_event_rule" "daily_close" {
-  schedule_expression = "cron(30 11 ? * MON-FRI *)"
+# EventBridge rule 1: morning decisions at 08:45 IST = 03:15 UTC Mon–Fri
+resource "aws_cloudwatch_event_rule" "morning_run" {
+  schedule_expression = "cron(15 3 ? * MON-FRI *)"
+}
+# EventBridge rule 2: square-off at 15:20 IST = 09:50 UTC Mon–Fri
+resource "aws_cloudwatch_event_rule" "squareoff_run" {
+  schedule_expression = "cron(50 9 ? * MON-FRI *)"
 }
 resource "aws_cloudwatch_event_target" "run_task" { ... }
 
@@ -1284,21 +1319,17 @@ COPY pyproject.toml .
 RUN mkdir trader && touch trader/__init__.py && pip install --no-cache-dir .
 COPY trader/ ./trader/
 RUN pip install --no-cache-dir --no-deps .
-CMD ["python", "-m", "trader.daily_run"]
+# Default command runs the morning decision pipeline.
+# The square-off run is triggered separately by EventBridge → squareoff_run.
+CMD ["python", "-m", "trader.morning_run"]
 ```
 
-### `pyproject.toml` — Project metadata + dependencies
+### `pyproject.toml` — Key dependencies
+
+Use `pyproject.toml` (PEP 517/518) consistent with the existing codebase — do not switch to `requirements.txt`.
 
 ```toml
-[build-system]
-requires = ["setuptools>=61.0.0", "wheel"]
-build-backend = "setuptools.build_meta"
-
 [project]
-name = "nse-llm-trader"
-version = "0.1.0"
-description = "Multi-agent LLM paper-trading system for Indian equities (NSE)"
-requires-python = ">=3.12"
 dependencies = [
     # Data
     "jugaad-data>=0.24.0",
@@ -1311,7 +1342,7 @@ dependencies = [
     "sentence-transformers>=3.0.0",
     # LLM & orchestration
     "anthropic>=0.34.0",
-    "google-generativeai>=0.8.0",
+    "google-generativeai>=0.8.3",
     "langgraph>=1.2.0",
     "langchain-anthropic>=0.3.0",
     "langchain-google-genai>=2.0.0",
@@ -1329,28 +1360,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = [
-    "pytest>=8.3.0",
-    "pytest-asyncio>=0.24.0",
-    "black>=24.0.0",
-    "ruff>=0.6.0",
-]
-
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["trader*"]
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["trader/tests"]
-
-[tool.ruff]
-line-length = 100
-target-version = "py312"
-
-[tool.black]
-line-length = 100
-target-version = ["py312"]
+dev = ["pytest>=8.3.0", "pytest-asyncio>=0.24.0", "black>=24.0.0", "ruff>=0.6.0"]
 ```
 
 ---
@@ -1362,20 +1372,20 @@ Build these test files. All tests must pass before any deployment.
 ### `tests/test_cost_model.py`
 
 ```python
-def test_delivery_buy_50k():
-    """₹50,000 delivery BUY. Expected total cost ≈ ₹70 (no sell-side charges on buy)."""
+def test_mis_round_trip_50k():
+    """₹50,000 MIS intraday BUY + SELL same day. Expected: ~₹53–60 (10.6–12 bps)."""
 
-def test_delivery_round_trip_50k():
-    """₹50,000 delivery BUY + SELL. Expected total ≈ ₹127–135 (25–27 bps)."""
+def test_mis_round_trip_500k():
+    """₹5,00,000 MIS trade: brokerage capped at ₹20 per leg, not 0.03%=₹150."""
 
-def test_intraday_round_trip_50k():
-    """₹50,000 intraday BUY + SELL. Expected total ≈ ₹53–60 (10–12 bps)."""
+def test_no_dp_charges_on_mis():
+    """MIS trades must never have DP charges. dp_charges field must be 0.00."""
 
-def test_dp_charges_only_on_sell():
-    """DP charge of ₹15.93 must only appear on SELL side of delivery trades."""
+def test_stt_sell_side_only_for_mis():
+    """MIS: STT 0.025% on SELL only. BUY leg must have zero STT."""
 
-def test_brokerage_cap():
-    """₹5,00,000 intraday trade: brokerage capped at ₹20, not 0.03% (=₹150)."""
+def test_cost_hurdle():
+    """Trade below 0.13% expected move (13 bps) should be flagged as below hurdle."""
 ```
 
 ### `tests/test_agents.py`
@@ -1391,7 +1401,7 @@ def test_quiet_skip_logic():
     """No news + price_change_1d < 1.5% → SKIP without calling LLM."""
 
 def test_circuit_breaker_drawdown():
-    """Portfolio drawdown >= 10% → PM can only output EXIT or HOLD, never BUY."""
+    """Daily drawdown >= 5% → PM must output SKIP, never BUY (no EXIT/HOLD in MIS)."""
 
 def test_restricted_ticker_skip():
     """Ticker marked as ASM/GSM → SKIP without calling agents."""
@@ -1401,16 +1411,19 @@ def test_restricted_ticker_skip():
 
 ```python
 def test_max_positions_enforced():
-    """With 5 open positions, BUY decision must be rejected."""
+    """With 5 open intraday positions, BUY decision must be rejected."""
 
 def test_max_position_size():
-    """BUY decision that would exceed 15% of NAV must be auto-reduced or rejected."""
+    """BUY decision that would exceed 15% of NAV must be rejected."""
 
-def test_auto_exit_held_too_long():
-    """Position held 5 days → auto EXIT signal generated."""
+def test_squareoff_all_positions():
+    """squareoff_all_positions() must close all Redis positions and write completed trades to DynamoDB."""
 
-def test_nav_calculation():
-    """NAV = cash + sum(qty × price) for all positions. Verify arithmetic."""
+def test_nav_eod_is_cash_only():
+    """End-of-day NAV must equal cash only (equity_value = 0). All MIS positions closed."""
+
+def test_daily_drawdown_halt():
+    """If realised + unrealised loss >= 5% of opening NAV, new BUY entries must be rejected."""
 ```
 
 ---
@@ -1441,21 +1454,22 @@ Build in this exact order. Do not skip ahead.
 
 **Phase 1D — Orchestration & Ledger (Day 7)**
 15. `orchestration/state.py` + `orchestration/graph.py` + `orchestration/runner.py`
-16. `ledger/paper_trade.py` + `ledger/circuit_breaker.py`
-17. `daily_run.py` — wires everything together
-18. `tests/test_ledger.py`
+16. `ledger/paper_trade.py` (intraday MIS fills, Redis position store, squareoff logic)
+17. `ledger/circuit_breaker.py` (5% daily drawdown halt, concentration limits)
+18. `morning_run.py` + `squareoff_run.py` — two separate entry points
+19. `tests/test_ledger.py`
 
 **Phase 1E — API + Dashboard (Days 8–10)**
-19. `api/routes/` — all 4 route files + `api/schemas.py`
-20. `trader/main.py` — FastAPI app
-21. `dashboard/` — Next.js app (all pages and components)
-22. End-to-end dry run: `docker-compose up` → hit all API endpoints
+20. `api/routes/` — all 4 route files + `api/schemas.py`
+21. `trader/main.py` — FastAPI app
+22. `dashboard/` — Next.js app (all pages and components)
+23. End-to-end dry run: `docker-compose up` → hit all API endpoints
 
 **Phase 1F — AWS Deployment (Days 11–14)**
-23. `infra/ecs/` module — ECS task + EventBridge cron
-24. `infra/eventbridge/` module
-25. GitHub Actions CI/CD: `push to main → terraform plan → docker build → ECR push → ECS task update`
-26. First scheduled run on AWS; verify CloudWatch logs
+24. `infra/ecs/` module — ECS task + both EventBridge crons (morning + squareoff)
+25. `infra/eventbridge/` module
+26. GitHub Actions CI/CD: `push to main → terraform plan → docker build → ECR push → ECS task update`
+27. First scheduled run on AWS; verify CloudWatch logs for both morning and squareoff runs
 
 ---
 
@@ -1463,9 +1477,11 @@ Build in this exact order. Do not skip ahead.
 
 > Read these before generating any code. Never violate them.
 
-1. **`PAPER_TRADING_MODE=true` must be checked at the top of `daily_run.py` before any broker call.** If false, throw an exception and exit. This gate must exist even in Phase 1 where no broker is wired.
+1. **`PAPER_TRADING_MODE=true` must be checked at the top of both `morning_run.py` and `squareoff_run.py` before any broker call.** If false, throw an exception and exit. This gate must exist even in Phase 1 where no broker is wired.
 
 2. **Never import or call `kiteconnect` order-placement methods in Phase 1.** Data-only Kite methods (quotes, history) are OK. Order placement (`place_order`, `modify_order`, `cancel_order`) must not exist in the codebase until Phase 2.
+
+2b. **Product type must always be MIS — never CNC.** Add a guard in `paper_trade.py`: `assert decision.product_type == 'MIS', 'CNC is forbidden in Phase 1'`. Any agent output with product_type=CNC must be rejected and logged as a schema error.
 
 3. **Never commit secrets.** `.env` in `.gitignore`. All keys from env vars or Secrets Manager only.
 
@@ -1477,7 +1493,9 @@ Build in this exact order. Do not skip ahead.
 
 7. **All monetary values stored as `Decimal` in DynamoDB, not `float`.** Financial calculations must be exact.
 
-8. **The `daily_run.py` must be idempotent.** Running it twice on the same day must not create duplicate trades. Check DynamoDB for existing run before processing.
+8. **Both `morning_run.py` and `squareoff_run.py` must be idempotent.** Running either twice on the same day must not create duplicate entries. Check DynamoDB for existing run before processing.
+
+8b. **Squareoff is unconditional.** The `squareoff_run.py` must close ALL Redis positions regardless of P&L, time-of-day check, or any other condition. It is the only safety net preventing phantom overnight positions in the simulation.
 
 9. **Never store full article text.** Headlines + URLs + 2-sentence summaries only. This is both a copyright consideration and a cost control.
 
@@ -1496,9 +1514,12 @@ When you start, run through this checklist:
 □ Run: pip install -e ".[dev]"
 □ Run: pytest tests/test_cost_model.py — must pass before anything else
 □ Run: docker-compose up — confirm FastAPI health endpoint responds
-□ Run: python -c "from trader.ingestion.market_data import fetch_eod_ohlcv; print(fetch_eod_ohlcv('RELIANCE', days=5))"
+□ Run: python -c "from trader.ingestion.market_data import fetch_prior_day_ohlcv; print(fetch_prior_day_ohlcv('RELIANCE', days=5))"
 □ Confirm DynamoDB tables exist (terraform apply if not)
-□ Run daily_run.py in dry-run mode: PAPER_TRADING_MODE=true DRY_RUN=true python -m trader.daily_run
+□ Run morning_run.py in dry-run mode: PAPER_TRADING_MODE=true DRY_RUN=true python -m trader.morning_run
+□ Run squareoff_run.py immediately after: PAPER_TRADING_MODE=true DRY_RUN=true python -m trader.squareoff_run
+□ Verify Redis has zero open positions after squareoff_run
+□ Verify nav_daily DynamoDB entry has equity_value_inr=0 after squareoff
 ```
 
 Ask me for any missing credentials or config values before starting the build.
@@ -1512,12 +1533,16 @@ The build is complete when ALL of the following are true:
 
 - [ ] `pytest tests/` passes with ≥ 95% pass rate
 - [ ] `docker-compose up` runs cleanly; `/api/health` returns 200
-- [ ] Daily run completes for all 15 tickers in < 8 minutes
+- [ ] Morning run completes for all 15 tickers in < 6 minutes (decisions ready before 09:15 open)
+- [ ] Square-off run completes in < 2 minutes
 - [ ] All 5 agent outputs are schema-valid ≥ 98% of the time across a 3-day dry run
-- [ ] Daily LLM cost is < $0.40 per run (monitor via CloudWatch)
-- [ ] DynamoDB tables populated correctly after each run
-- [ ] Next.js dashboard displays NAV chart, positions, and decision log
-- [ ] EventBridge triggers ECS task at 17:00 IST on a weekday
+- [ ] All PM decisions have product_type=MIS — zero CNC decisions ever
+- [ ] Redis position store is always zero after squareoff_run completes
+- [ ] nav_daily equity_value_inr = 0 every day (no overnight positions)
+- [ ] Daily LLM cost is < $0.40 per morning run (monitor via CloudWatch)
+- [ ] DynamoDB trades table populated with completed round-trips after squareoff
+- [ ] Next.js dashboard displays NAV chart, today's trades, and decision log
+- [ ] Both EventBridge rules trigger on a weekday (08:45 IST + 15:20 IST)
 - [ ] Total monthly AWS + LLM cost estimate is < ₹2,000
 
 ---
