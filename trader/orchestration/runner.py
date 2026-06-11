@@ -327,73 +327,118 @@ def _build_macro_context(nifty_df) -> dict:
 
 def _load_ledger(trade_date_str: str) -> PaperTradingLedger:
     """
-    Load the ledger from DynamoDB if a previous run exists, else start from scratch.
-    Uses yesterday's NAV + today's open positions.
+    Load yesterday's NAV from DynamoDB to restore cash/peak state.
+    MIS positions are never loaded here — intraday positions don't persist across days.
     """
     from datetime import date, timedelta
 
-    settings = get_settings()
     today = date.fromisoformat(trade_date_str)
     yesterday = (today - timedelta(days=1)).isoformat()
 
-    # Try to restore from yesterday's NAV snapshot
     nav_item = dynamo.get_nav(yesterday)
     if nav_item is None:
         logger.info("No prior NAV found — initialising ledger from scratch.")
         return PaperTradingLedger.from_scratch(trade_date_str)
 
-    # Load today's open positions (still under TICKER#X keys)
-    position_items: list[dict] = []
-    for t in UNIVERSE:
-        pos = dynamo.get_position(t.symbol, yesterday)
-        if pos and int(pos.get("qty", 0)) > 0:
-            pos["PK"] = f"TICKER#{t.symbol}"
-            position_items.append(pos)
-
+    # MIS: no positions to restore — all positions were squared off at 15:15 yesterday
     return PaperTradingLedger.from_dynamo_snapshot(
         nav_item=nav_item,
-        position_items=position_items,
         trade_date=trade_date_str,
     )
 
 
-def _persist_open_positions(ledger: PaperTradingLedger, date_str: str) -> None:
-    """Write open position items to DynamoDB at end of run."""
-    import time
-    ttl = int(time.time()) + 30 * 24 * 3600
+def _save_intraday_positions_to_redis(
+    ledger: PaperTradingLedger,
+    trade_date_str: str,
+) -> None:
+    """
+    Write all open intraday positions to Redis after the morning run.
+    The squareoff run reads these at 15:20 IST to close all positions.
+    Redis key pattern: INTRADAY_POS:{date}:{ticker}  TTL: 24h
+    """
+    import json
 
-    for pos_dict in ledger.open_positions_as_dicts():
-        ticker = pos_dict["ticker"]
-        item = {
-            "PK": f"TICKER#{ticker}",
-            "SK": f"DATE#{date_str}",
-            "qty": pos_dict["qty"],
-            "avg_price": pos_dict["avg_price"],
-            "entry_date": pos_dict["entry_date"],
-            "days_held": pos_dict["days_held"],
-            "product_type": "CNC",
-            "horizon_days": pos_dict["horizon_days"],
-            "stop_loss_price": pos_dict["stop_loss_price"],
-            "target_price": pos_dict["target_price"],
-            "kill_conditions": pos_dict["kill_conditions"],
-            "decision_date": pos_dict["entry_date"],
-            "ttl": ttl,
-        }
-        try:
-            dynamo.put_position(item)
-        except Exception as e:
-            logger.error("Failed to persist position for %s: %s", ticker, e)
+    open_positions = ledger.open_positions_as_dicts()
+    if not open_positions:
+        logger.info("[redis] No open intraday positions to save.")
+        return
+
+    try:
+        import redis as redis_lib
+        r = redis_lib.from_url(get_settings().redis_url)
+        pipe = r.pipeline()
+        tickers_key = f"INTRADAY_TICKERS:{trade_date_str}"
+        for pos_dict in open_positions:
+            ticker = pos_dict["ticker"]
+            pos_key = f"INTRADAY_POS:{trade_date_str}:{ticker}"
+            pipe.set(pos_key, json.dumps(pos_dict), ex=86400)
+            pipe.sadd(tickers_key, ticker)
+        pipe.expire(tickers_key, 86400)
+        pipe.execute()
+        logger.info(
+            "[redis] Saved %d open intraday positions for %s",
+            len(open_positions), trade_date_str,
+        )
+    except Exception as e:
+        logger.error("[redis] Failed to save intraday positions: %s", e)
+
+
+def _load_intraday_positions_from_redis(trade_date_str: str) -> list[dict]:
+    """
+    Load open intraday positions from Redis for the squareoff run.
+    Returns list of position dicts; empty list if Redis unavailable or no positions.
+    """
+    import json
+
+    try:
+        import redis as redis_lib
+        r = redis_lib.from_url(get_settings().redis_url)
+        tickers_key = f"INTRADAY_TICKERS:{trade_date_str}"
+        raw_tickers = r.smembers(tickers_key)
+        if not raw_tickers:
+            logger.info("[redis] No open positions found for %s.", trade_date_str)
+            return []
+
+        positions = []
+        for raw in raw_tickers:
+            ticker = raw.decode() if isinstance(raw, bytes) else raw
+            pos_key = f"INTRADAY_POS:{trade_date_str}:{ticker}"
+            raw_pos = r.get(pos_key)
+            if raw_pos:
+                positions.append(json.loads(raw_pos))
+
+        logger.info(
+            "[redis] Loaded %d open intraday positions for %s",
+            len(positions), trade_date_str,
+        )
+        return positions
+    except Exception as e:
+        logger.warning("[redis] Failed to load intraday positions: %s", e)
+        return []
 
 
 def run_daily(trade_date_str: str | None = None) -> DailyRunState:
+    """Deprecated alias for run_morning(). Use run_morning() directly."""
+    logger.warning(
+        "run_daily() is deprecated — call run_morning() instead. "
+        "daily_run.py will be removed once morning_run.py is the ECS entry point."
+    )
+    return run_morning(trade_date_str)
+
+
+def run_morning(trade_date_str: str | None = None) -> DailyRunState:
     """
-    Execute the full daily pipeline for all 15 tickers.
+    Execute the morning pipeline for all 15 tickers (08:45 IST).
+
+    Produces BUY/SKIP decisions, simulates BUY fills, and persists
+    open intraday positions to Redis. The squareoff run at 15:20 IST
+    reads those positions and closes them.
 
     Args:
         trade_date_str: "yyyy-mm-dd"; defaults to today in IST.
 
     Returns:
-        DailyRunState summarising the completed run.
+        DailyRunState summarising the completed morning run.
     """
     settings = get_settings()
 
@@ -437,19 +482,8 @@ def run_daily(trade_date_str: str | None = None) -> DailyRunState:
         fii_dii = {"fii_net_buy_cr": 0.0, "dii_net_buy_cr": 0.0, "date": "", "source": "unavailable"}
 
     # ── Load ledger ────────────────────────────────────────────────────────────
+    # MIS: always starts fresh — no positions carry over from prior day.
     ledger = _load_ledger(trade_date_str)
-
-    # Advance day: increment days_held for all open positions
-    # Current prices needed; fetch from yesterday's close as proxy
-    current_prices: dict[str, float] = {}
-    for t in UNIVERSE:
-        try:
-            df = fetch_eod_ohlcv(t.symbol, days=2)
-            if not df.empty:
-                current_prices[t.symbol] = float(df.iloc[-1]["close"])
-        except Exception:
-            pass
-    ledger.advance_day(current_prices)
 
     # ── Build the compiled graph (once, reused for all 15 tickers) ────────────
     daily_cost_ref: list[float] = [0.0]
@@ -491,10 +525,6 @@ def run_daily(trade_date_str: str | None = None) -> DailyRunState:
             portfolio_snap = ledger.portfolio_snapshot({ticker: market_data["close_price"]})
             current_pos = ledger.current_position_for(ticker)
 
-            # Auto-exit positions held beyond max_hold_days
-            pos = ledger.positions.get(ticker)
-            is_overdue = pos is not None and pos.qty > 0 and pos.days_held >= settings.max_hold_days
-
             state = empty_ticker_state(
                 ticker=ticker,
                 company_name=ticker_cfg.name,
@@ -510,30 +540,9 @@ def run_daily(trade_date_str: str | None = None) -> DailyRunState:
                 "is_restricted": False,  # TODO: plug in real ASM/GSM check
             })
 
-            # If overdue, force EXIT directly (skip LLM pipeline)
-            if is_overdue:
-                logger.info("[%s] Auto-EXIT: held %d days (max=%d)", ticker, pos.days_held, settings.max_hold_days)
-                from trader.agents.models import pm_hold_fallback
-                auto_exit = pm_hold_fallback(ticker).model_copy(update={
-                    "decision": "EXIT",
-                    "primary_thesis": f"Auto-exit: position held {pos.days_held} days (max {settings.max_hold_days}).",
-                })
-                state["pm_output"] = auto_exit.model_dump()
-                # Simulate the fill manually
-                fill = ledger.simulate_fill(
-                    ticker=ticker,
-                    decision="EXIT",
-                    quantity_shares=0,  # uses pos.qty
-                    close_price=market_data["close_price"],
-                )
-                if fill:
-                    ledger.update_positions(fill)
-                    state["simulated_fill"] = fill.as_dict()
-
-            else:
-                # ── Run LangGraph pipeline ─────────────────────────────────────
-                result = compiled_graph.invoke(state)
-                state = result
+            # ── Run LangGraph pipeline ─────────────────────────────────────────
+            result = compiled_graph.invoke(state)
+            state = result
 
         except Exception as e:
             logger.exception("Pipeline failed for %s: %s", ticker, e)
@@ -551,8 +560,10 @@ def run_daily(trade_date_str: str | None = None) -> DailyRunState:
         # ── Per-ticker summary block ───────────────────────────────────────────
         _log_ticker_summary(ticker, state, elapsed_ms, run_state["total_cost_usd"])
 
-    # ── End of run: persist positions + NAV ───────────────────────────────────
-    _persist_open_positions(ledger, trade_date_str)
+    # ── End of morning run: save open positions to Redis ──────────────────────
+    settings = get_settings()
+    if not settings.dry_run:
+        _save_intraday_positions_to_redis(ledger, trade_date_str)
 
     nifty_close = 0.0
     nifty_1d_pct = macro_ctx.get("nifty_1d_pct", 0.0)
@@ -569,10 +580,10 @@ def run_daily(trade_date_str: str | None = None) -> DailyRunState:
     except Exception:
         pass
 
-    nav_snap = ledger.calculate_nav(
-        current_prices={t.symbol: current_prices.get(t.symbol, 0.0) for t in UNIVERSE},
-        previous_nav_inr=prev_nav,
-    )
+    # Intraday NAV snapshot: equity = open positions at prior-day close prices.
+    # eod=False so equity_value_inr reflects the open MIS positions.
+    # The final EOD NAV (equity=0) is overwritten by squareoff_run.py at 15:20 IST.
+    nav_snap = ledger.calculate_nav(previous_nav_inr=prev_nav, eod=False)
 
     skipped = sum(
         1 for s in run_state["ticker_states"].values() if s.get("skip_reason")
@@ -603,7 +614,228 @@ def run_daily(trade_date_str: str | None = None) -> DailyRunState:
     run_state["portfolio"] = nav_snap.as_dict()
 
     logger.info(
-        "=== Run complete %s | NAV=₹%.0f | cost=$%.4f | %d tickers (%d skipped) ===",
+        "=== Morning run complete %s | NAV=₹%.0f (intraday) | cost=$%.4f | %d tickers (%d skipped) ===",
         trade_date_str, nav_snap.nav_inr, run_state["total_cost_usd"], len(UNIVERSE), skipped,
     )
     return run_state
+
+
+def run_squareoff(trade_date_str: str | None = None) -> dict:
+    """
+    Execute the mandatory 15:20 IST squareoff run.
+
+    Reads all open intraday positions from Redis, fetches the most recent
+    closing prices, calls squareoff_all_positions(), writes each completed
+    round-trip to DynamoDB (trades table), and updates nav_daily with the
+    final EOD figures (equity_value_inr = 0).
+
+    This function MUST run unconditionally — it is the only safety net
+    preventing phantom overnight positions in the simulation.
+
+    Args:
+        trade_date_str: "yyyy-mm-dd"; defaults to today in IST.
+
+    Returns:
+        dict with summary: {trade_date, trades_closed, net_pnl_inr, nav_inr, completed_at}
+    """
+    import time as _time
+    from datetime import timedelta
+
+    settings = get_settings()
+
+    if trade_date_str is None:
+        trade_date_str = datetime.now(IST).date().isoformat()
+
+    logger.info("=== Squareoff run starting for %s ===", trade_date_str)
+
+    # ── Idempotency: skip if already squared off today ─────────────────────
+    existing_trades = dynamo.get_trades_for_date(trade_date_str)
+    if existing_trades:
+        logger.info(
+            "Squareoff for %s already completed (%d trades found) — exiting.",
+            trade_date_str, len(existing_trades),
+        )
+        return {
+            "trade_date": trade_date_str,
+            "trades_closed": len(existing_trades),
+            "already_completed": True,
+        }
+
+    # ── Load open positions from Redis ─────────────────────────────────────
+    position_dicts = _load_intraday_positions_from_redis(trade_date_str)
+    if not position_dicts:
+        logger.info("No open intraday positions for %s — nothing to squareoff.", trade_date_str)
+        # Still write EOD NAV (all cash, no equity)
+        nav_item_prev = dynamo.get_nav(trade_date_str)
+        cash = float(nav_item_prev.get("cash_inr", settings.initial_capital_inr)) if nav_item_prev else settings.initial_capital_inr
+        _write_eod_nav(
+            trade_date_str=trade_date_str,
+            cash_inr=cash,
+            prev_nav_inr=cash,
+            trades=[],
+            nifty_close=0.0,
+            nifty_1d_pct=0.0,
+            total_llm_cost_usd=0.0,
+        )
+        return {"trade_date": trade_date_str, "trades_closed": 0}
+
+    # ── Reconstruct ledger from Redis positions ────────────────────────────
+    # Load yesterday's NAV for cash/peak state
+    yesterday = (date.fromisoformat(trade_date_str) - timedelta(days=1)).isoformat()
+    nav_item = dynamo.get_nav(yesterday)
+    ledger = (
+        PaperTradingLedger.from_dynamo_snapshot(nav_item=nav_item, trade_date=trade_date_str)
+        if nav_item
+        else PaperTradingLedger.from_scratch(trade_date_str)
+    )
+
+    # Re-populate in-memory positions from Redis
+    from trader.ledger.paper_trade import Position
+    for pos_dict in position_dicts:
+        ticker = pos_dict["ticker"]
+        try:
+            from trader.config.tickers import get_ticker as _get_ticker
+            sector = _get_ticker(ticker).sector
+        except ValueError:
+            sector = pos_dict.get("sector", "Unknown")
+        ledger.positions[ticker] = Position(
+            ticker=ticker,
+            sector=sector,
+            qty=int(pos_dict["qty"]),
+            avg_price=float(pos_dict["avg_price"]),
+            entry_date=pos_dict.get("entry_date", trade_date_str),
+            entry_time_ist=pos_dict.get("entry_time_ist", "09:20"),
+            stop_loss_price=float(pos_dict.get("stop_loss_price", 0)),
+            target_price=float(pos_dict.get("target_price", 0)),
+            current_price=float(pos_dict.get("avg_price", 0)),
+        )
+        # Adjust cash: subtract the position value that was already deducted in morning run
+        # (cash in nav_item already reflects morning buys — don't double-deduct)
+    logger.info(
+        "[squareoff] Reconstructed %d open intraday positions.", len(position_dicts)
+    )
+
+    # ── Fetch closing prices (most recent available EOD data) ──────────────
+    closing_prices: dict[str, float] = {}
+    for ticker in list(ledger.positions.keys()):
+        if ledger.positions[ticker].qty == 0:
+            continue
+        try:
+            df = fetch_eod_ohlcv(ticker, days=2)
+            if not df.empty:
+                closing_prices[ticker] = float(df.iloc[-1]["close"])
+        except Exception as e:
+            logger.warning("[squareoff] Could not fetch close for %s: %s", ticker, e)
+
+    # ── Squareoff all positions unconditionally ────────────────────────────
+    completed_trades = ledger.squareoff_all_positions(closing_prices)
+    logger.info("[squareoff] Closed %d intraday positions.", len(completed_trades))
+
+    # ── Write completed round-trip trades to DynamoDB ──────────────────────
+    ttl = int(_time.time()) + 30 * 24 * 3600
+    if not settings.dry_run:
+        for trade in completed_trades:
+            item = {
+                "PK": f"DATE#{trade_date_str}",
+                "SK": f"TRADE#{trade.trade_id}",
+                **trade.as_dict(),
+                "ttl": ttl,
+            }
+            try:
+                dynamo.put_trade(item)
+            except Exception as e:
+                logger.error("[squareoff] Failed to write trade %s: %s", trade.trade_id, e)
+
+    # ── Fetch Nifty context for EOD NAV record ─────────────────────────────
+    nifty_close = 0.0
+    nifty_1d_pct = 0.0
+    try:
+        nifty_df = fetch_nifty50_index(days=5)
+        if nifty_df is not None and not nifty_df.empty:
+            closes = nifty_df["close"].dropna()
+            nifty_close = float(closes.iloc[-1])
+            if len(closes) >= 2:
+                nifty_1d_pct = float((closes.iloc[-1] - closes.iloc[-2]) / closes.iloc[-2] * 100)
+    except Exception as e:
+        logger.warning("[squareoff] Nifty fetch failed: %s", e)
+
+    # LLM cost for today (already in morning run's nav_item)
+    morning_nav = dynamo.get_nav(trade_date_str)
+    total_llm_cost = float(morning_nav.get("total_llm_cost_usd_today", 0.0)) if morning_nav else 0.0
+
+    # ── Write final EOD NAV ────────────────────────────────────────────────
+    if not settings.dry_run:
+        _write_eod_nav(
+            trade_date_str=trade_date_str,
+            cash_inr=ledger.cash_inr,
+            prev_nav_inr=float(nav_item.get("nav_inr", settings.initial_capital_inr)) if nav_item else settings.initial_capital_inr,
+            trades=completed_trades,
+            nifty_close=nifty_close,
+            nifty_1d_pct=nifty_1d_pct,
+            total_llm_cost_usd=total_llm_cost,
+        )
+
+    total_net_pnl = sum(t.net_pnl_inr for t in completed_trades)
+    wins = sum(1 for t in completed_trades if t.net_pnl_inr > 0)
+
+    completed_at = datetime.now(IST).isoformat()
+    logger.info(
+        "=== Squareoff complete %s | %d trades | wins=%d | net P&L=₹%.0f | NAV=₹%.0f ===",
+        trade_date_str, len(completed_trades), wins, total_net_pnl, ledger.cash_inr,
+    )
+    return {
+        "trade_date": trade_date_str,
+        "trades_closed": len(completed_trades),
+        "wins": wins,
+        "net_pnl_inr": round(total_net_pnl, 2),
+        "nav_inr": round(ledger.cash_inr, 2),
+        "completed_at": completed_at,
+    }
+
+
+def _write_eod_nav(
+    trade_date_str: str,
+    cash_inr: float,
+    prev_nav_inr: float,
+    trades: list,
+    nifty_close: float,
+    nifty_1d_pct: float,
+    total_llm_cost_usd: float,
+) -> None:
+    """Write the final end-of-day NAV record to DynamoDB (equity_value_inr = 0)."""
+    import time as _time
+
+    wins = sum(1 for t in trades if t.net_pnl_inr > 0)
+    losses = len(trades) - wins
+    gross_pnl = sum(t.gross_pnl_inr for t in trades)
+    total_costs = sum(t.total_cost_inr for t in trades)
+    net_pnl = sum(t.net_pnl_inr for t in trades)
+    daily_return = (cash_inr - prev_nav_inr) / prev_nav_inr * 100 if prev_nav_inr > 0 else 0.0
+
+    item = {
+        "PK": f"DATE#{trade_date_str}",
+        "SK": "PORTFOLIO",
+        "nav_inr": round(cash_inr, 2),
+        "cash_inr": round(cash_inr, 2),
+        "equity_value_inr": 0.0,          # always 0 at EOD — all MIS closed
+        "intraday_trades_count": len(trades),
+        "intraday_wins": wins,
+        "intraday_losses": losses,
+        "gross_pnl_inr": round(gross_pnl, 2),
+        "total_costs_inr": round(total_costs, 2),
+        "net_pnl_inr": round(net_pnl, 2),
+        "daily_return_pct": round(daily_return, 4),
+        "nifty50_close": nifty_close,
+        "nifty50_daily_return_pct": round(nifty_1d_pct, 4),
+        "total_llm_cost_usd_today": total_llm_cost_usd,
+        "squareoff_complete": True,
+        "ttl": int(_time.time()) + 30 * 24 * 3600,
+    }
+    try:
+        dynamo.put_nav(item)
+        logger.info(
+            "[squareoff] EOD NAV written: ₹%.0f | net P&L ₹%.0f | %d trades",
+            cash_inr, net_pnl, len(trades),
+        )
+    except Exception as e:
+        logger.error("[squareoff] Failed to write EOD NAV: %s", e)
