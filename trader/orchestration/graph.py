@@ -4,6 +4,7 @@ LangGraph StateGraph for the per-ticker agent pipeline.
 Graph flow (per ticker):
   START
     → check_restrictions  (ASM/GSM/T2T?)
+    → check_entry_cutoff  (current time > 11:00 IST?)
     → check_quiet         (no news + small move?)
     → news_sentiment
     → technical
@@ -32,7 +33,7 @@ from langgraph.graph import END, START, StateGraph
 
 from trader.agents.bull_bear import BullBearAgent
 from trader.agents.fundamentals import FundamentalsAgent
-from trader.agents.models import TokenUsage, pm_hold_fallback
+from trader.agents.models import TokenUsage, pm_skip_fallback
 from trader.agents.news_sentiment import NewsSentimentAgent
 from trader.agents.portfolio_manager import PortfolioManagerAgent
 from trader.agents.technical import TechnicalAgent
@@ -74,6 +75,14 @@ def check_restrictions_node(state: dict) -> dict:
     if state.get("is_restricted"):
         logger.info("[%s] RESTRICTED — skipping pipeline", state["ticker"])
         return {"skip_reason": "RESTRICTED"}
+    return {}
+
+
+def check_entry_cutoff_node(state: dict) -> dict:
+    """Skip new entries if the 11:00 IST entry window has closed."""
+    if state.get("entry_cutoff_passed"):
+        logger.info("[%s] TIME_CUTOFF — entry window closed (>11:00 IST)", state["ticker"])
+        return {"skip_reason": "TIME_CUTOFF"}
     return {}
 
 
@@ -260,7 +269,6 @@ def _build_pm_node(ledger: "PaperTradingLedger", daily_cost_ref: list[float]):
             open_positions_count=snapshot.get("open_positions", 0),
             position_qty=pos.get("qty", 0),
             avg_price=pos.get("avg_price", 0.0),
-            days_held=pos.get("days_held", 0),
             drawdown_pct=snapshot.get("drawdown_pct", 0.0),
             nav=snapshot.get("nav_inr", 0.0),
             max_position_value=max_pos_value,
@@ -276,8 +284,8 @@ def _build_pm_node(ledger: "PaperTradingLedger", daily_cost_ref: list[float]):
             )
             pm_output = pm_output.model_copy(update={
                 "decision": enforced_decision,
-                "decision_rationale": rationale,
-                "quantity_shares": 0 if enforced_decision in ("HOLD", "SKIP") else pm_output.quantity_shares,
+                "skip_reason": rationale,
+                "quantity_shares": 0 if enforced_decision == "SKIP" else pm_output.quantity_shares,
             })
 
         elapsed = int((time.time() - t0) * 1000)
@@ -324,11 +332,11 @@ def _build_ledger_execute_node(ledger: "PaperTradingLedger"):
             logger.info("[%s] No PM output — skipping fill", ticker)
             return {"simulated_fill": None}
 
-        decision = pm.get("decision", "HOLD")
+        decision = pm.get("decision", "SKIP")
         mdata = state.get("market_data", {})
         close_price = mdata.get("close_price", 0.0)
 
-        if decision not in ("BUY", "EXIT") or close_price <= 0:
+        if decision != "BUY" or close_price <= 0:
             return {"simulated_fill": None}
 
         fill = ledger.simulate_fill(
@@ -338,18 +346,10 @@ def _build_ledger_execute_node(ledger: "PaperTradingLedger"):
             close_price=close_price,
             stop_loss_price=pm.get("stop_loss_price", 0.0),
             target_price=pm.get("target_price", 0.0),
-            kill_conditions=pm.get("kill_conditions", []),
-            horizon_days=pm.get("horizon_days", 3),
         )
 
         if fill:
-            ledger.update_positions(
-                fill=fill,
-                stop_loss_price=pm.get("stop_loss_price", 0.0),
-                target_price=pm.get("target_price", 0.0),
-                kill_conditions=pm.get("kill_conditions", []),
-                horizon_days=pm.get("horizon_days", 3),
-            )
+            ledger.open_intraday_position(fill)
             return {"simulated_fill": fill.as_dict()}
 
         return {"simulated_fill": None}
@@ -385,7 +385,7 @@ def _build_persist_dynamo_node(date_str: str):
                     continue
                 output = {
                     "decision": "SKIP",
-                    "decision_rationale": skip_reason,
+                    "skip_reason": skip_reason,
                     "confidence": 0.0,
                     "primary_thesis": f"Skipped: {skip_reason}",
                 }
@@ -431,7 +431,7 @@ def _build_persist_dynamo_node(date_str: str):
                 "simulated_cost_inr": fill.get("total_cost_inr", 0.0),
                 "simulated_cost_bps": fill.get("cost_bps", 0.0),
                 "slippage_bps": 3.0,
-                "product_type": "CNC",
+                "product_type": "MIS",
                 "ttl": ttl,
             }
             try:
@@ -475,6 +475,10 @@ def _route_after_restriction(state: dict) -> str:
     return "skip" if state.get("skip_reason") else "continue"
 
 
+def _route_after_entry_cutoff(state: dict) -> str:
+    return "skip" if state.get("skip_reason") else "continue"
+
+
 def _route_after_quiet(state: dict) -> str:
     return "skip" if state.get("skip_reason") else "continue"
 
@@ -504,6 +508,7 @@ def build_ticker_graph(
     graph = StateGraph(TickerState)
 
     graph.add_node("check_restrictions", check_restrictions_node)
+    graph.add_node("check_entry_cutoff", check_entry_cutoff_node)
     graph.add_node("check_quiet", check_quiet_node)
     graph.add_node("news_sentiment", news_sentiment_node)
     graph.add_node("technical", technical_node)
@@ -520,6 +525,11 @@ def build_ticker_graph(
     graph.add_conditional_edges(
         "check_restrictions",
         _route_after_restriction,
+        {"skip": "persist_dynamo", "continue": "check_entry_cutoff"},
+    )
+    graph.add_conditional_edges(
+        "check_entry_cutoff",
+        _route_after_entry_cutoff,
         {"skip": "persist_dynamo", "continue": "check_quiet"},
     )
     graph.add_conditional_edges(

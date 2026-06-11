@@ -530,6 +530,9 @@ def run_morning(trade_date_str: str | None = None) -> DailyRunState:
                 company_name=ticker_cfg.name,
                 sector=ticker_cfg.sector,
             )
+            now_ist = datetime.now(IST)
+            entry_cutoff_passed = (now_ist.hour, now_ist.minute) >= (11, 0)
+
             state.update({
                 "market_data": market_data,
                 "news_articles": news_articles,
@@ -538,6 +541,7 @@ def run_morning(trade_date_str: str | None = None) -> DailyRunState:
                 "portfolio_snapshot": portfolio_snap,
                 "current_position": current_pos,
                 "is_restricted": False,  # TODO: plug in real ASM/GSM check
+                "entry_cutoff_passed": entry_cutoff_passed,
             })
 
             # ── Run LangGraph pipeline ─────────────────────────────────────────

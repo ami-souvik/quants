@@ -24,11 +24,17 @@ class TickerState(TypedDict):
     # Portfolio snapshot BEFORE processing this ticker
     portfolio_snapshot: dict   # {cash_inr, open_positions, nav_inr, drawdown_pct}
 
-    # Current position for THIS ticker (empty dict if no open position)
-    current_position: dict     # {qty, avg_price, entry_date, days_held, stop_loss, target}
+    # Current intraday position for THIS ticker (empty dict if no open MIS position)
+    # Sourced from Redis key INTRADAY_POS:{date}:{ticker}
+    # Shape: {qty, avg_price, entry_time_ist} — no days_held (all MIS, same day)
+    current_position: dict
 
     # ASM/GSM/T2T flag — set by runner before graph starts
     is_restricted: bool
+
+    # True when current IST time > 11:00 — no new entries allowed
+    # Set by runner at graph-build time based on current clock
+    entry_cutoff_passed: bool
 
     # Agent outputs (None until the node runs)
     news_output: dict | None
@@ -41,7 +47,7 @@ class TickerState(TypedDict):
     simulated_fill: dict | None  # SimulatedFill as dict, or None if no fill
 
     # Pipeline control
-    skip_reason: str | None    # "QUIET" | "RESTRICTED" | "DRAWDOWN" | None
+    skip_reason: str | None    # "QUIET" | "RESTRICTED" | "TIME_CUTOFF" | "DRAWDOWN" | None
 
     # Observability
     tokens_used: dict          # {agent_name: {input, output, cached, cost_usd}}
@@ -71,6 +77,7 @@ def empty_ticker_state(ticker: str, company_name: str, sector: str) -> TickerSta
         portfolio_snapshot={},
         current_position={},
         is_restricted=False,
+        entry_cutoff_passed=False,
         news_output=None,
         technical_output=None,
         fundamentals_output=None,
