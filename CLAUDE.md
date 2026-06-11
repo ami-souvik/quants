@@ -129,7 +129,8 @@ agentic-trading/
 │   │   ├── layout.tsx
 │   │   ├── page.tsx                 # Main dashboard
 │   │   ├── decisions/page.tsx       # Decision log viewer
-│   │   └── metrics/page.tsx         # Performance vs benchmarks
+│   │   ├── metrics/page.tsx         # Performance vs benchmarks
+│   │   └── how-it-works/page.tsx    # Visual system architecture explainer
 │   ├── components/
 │   │   ├── NavChart.tsx             # NAV vs Nifty 50 line chart (Recharts)
 │   │   ├── PositionsTable.tsx
@@ -1161,6 +1162,19 @@ Build `dashboard/` as Next.js 14 App Router with TypeScript and Tailwind CSS.
 - Per-agent hit rate bar chart (which agents are contributing signal?)
 - LLM cost breakdown (pie chart by agent × model)
 - Statistical significance warning banner: "21 observations is not enough to claim alpha"
+
+**`app/how-it-works/page.tsx` — System Architecture Visual**
+A fully static explainer page for the entire system. Sections (keep in sync with actual implementation):
+1. **Daily Pipeline overview** — horizontal flow diagram: Data Ingestion → 5 LLM Agents → PM Decision → Paper Ledger → Persist → Dashboard
+2. **Data Sources** — 18 RSS feeds grouped by publisher (NSE 6, ET 6, Livemint 2, BS 4) + market data (jugaad-data/nselib) + deduplication note
+3. **Five-Agent Pipeline** — per-agent card showing: index, name, model (with escalation logic for PM), inputs, JSON output fields, role description; sequential arrow connectors; prompt caching and retry/fallback notes
+4. **Transaction Cost Model** — table of all Indian 2025-26 charges for CNC delivery vs MIS intraday; round-trip bps benchmarks; 28 bps cost hurdle explanation
+5. **Circuit Breakers & Safety Gates** — 6 breakers: Portfolio Drawdown ≥10%, LLM Cost >$1, Concentration Cap 15% NAV, Sector Cap 40% NAV, Restricted Ticker (ASM/GSM/T2T), Quiet Skip
+6. **Paper Ledger & Position Rules** — 4 key constraints (₹10L capital, 5 max positions, 15% NAV cap, 5-day max hold); fill simulation at prior-day close + 3 bps slippage; CNC-only note
+7. **AWS Infrastructure** — table of all services (ECS Fargate, EventBridge, DynamoDB, S3, Secrets Manager, CloudWatch, Redis, SNS) with purpose and detail; cost target <₹2,000/month
+8. **Phase Roadmap** — Phase 1 Paper Trading (active) vs Phase 2 Live Trading via Zerodha (future, unlocks after 30-day validation)
+
+> **IMPORTANT:** When any system behaviour listed above changes (new agent, different model, new circuit breaker, cost change, new infrastructure resource), update this section AND the corresponding section in `app/how-it-works/page.tsx` so the dashboard stays accurate.
 
 ### Design requirements
 - Dark mode by default (trading terminals are dark)

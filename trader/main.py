@@ -11,7 +11,7 @@ Run locally:
     uvicorn trader.main:app --reload --port 8000
 
 Run via Docker Compose:
-    docker-compose up trader-api
+    docker compose up trader-api
 """
 from __future__ import annotations
 

@@ -45,7 +45,7 @@ export default async function DashboardPage() {
           {error ?? "Could not reach the FastAPI backend. Make sure the API server is running."}
         </p>
         <code className="text-xs bg-surface px-3 py-1.5 rounded font-mono text-subtle">
-          docker-compose up trader-api
+          docker compose up trader-api
         </code>
       </div>
     );

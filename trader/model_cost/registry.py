@@ -28,6 +28,8 @@ MODEL_ALIASES: dict[str, str] = {
     # Anthropic aliases (in case versioned IDs are used)
     "claude-haiku-4-5-20251014": "claude-haiku-4-5",
     "claude-sonnet-4-6-20251015": "claude-sonnet-4-6",
+    
+    "gemma-4-31b-it": "gemma-4-31b-it",
 }
 
 
