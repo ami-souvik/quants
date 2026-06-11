@@ -10,7 +10,7 @@ from trader.agents.models import (
     BullBearOutput,
     PMDecision,
     TokenUsage,
-    pm_hold_fallback,
+    pm_skip_fallback,
 )
 
 __all__ = [
@@ -25,5 +25,5 @@ __all__ = [
     "BullBearOutput",
     "PMDecision",
     "TokenUsage",
-    "pm_hold_fallback",
+    "pm_skip_fallback",
 ]

@@ -11,7 +11,7 @@ import logging
 from collections import Counter
 
 from trader.agents.base import BaseAgent, _safe_format
-from trader.agents.models import PMDecision, TokenUsage, pm_hold_fallback
+from trader.agents.models import PMDecision, TokenUsage, pm_skip_fallback
 from trader.config.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -100,7 +100,7 @@ class PortfolioManagerAgent(BaseAgent):
 
         if not decisions:
             logger.error("[portfolio_manager] All Haiku samples failed for %s — returning HOLD", ticker)
-            return pm_hold_fallback(ticker), total_usage, False
+            return pm_skip_fallback(ticker), total_usage, False
 
         # ── Step 2: Majority vote on decision type ────────────────────────────
         vote_counts = Counter(d.decision for d in decisions)

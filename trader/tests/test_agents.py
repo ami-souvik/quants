@@ -20,7 +20,7 @@ from trader.agents.models import (
     PMDecision,
     TechnicalOutput,
     TokenUsage,
-    pm_hold_fallback,
+    pm_skip_fallback,
 )
 from trader.agents.base import BaseAgent
 from trader.agents.news_sentiment import NewsSentimentAgent
@@ -42,7 +42,7 @@ def _valid_news_json(ticker: str = "RELIANCE") -> str:
         "sentiment_score": 0.72,
         "sentiment_label": "BULLISH",
         "key_events": ["Q4 profit beat by 8%"],
-        "news_window": "AFTER_CLOSE",
+        "news_window": "PREV_AFTER_CLOSE",
         "data_quality": "HIGH",
         "confidence": 0.78,
         "reasoning": "Strong results and positive guidance.",
@@ -53,10 +53,12 @@ def _valid_technical_json(ticker: str = "RELIANCE") -> str:
     return json.dumps({
         "ticker": ticker,
         "technical_signal": "BUY",
-        "trend": "UPTREND",
+        "intraday_bias": "GAP_UP_CONTINUATION",
         "momentum": "OVERSOLD",
-        "suggested_stop_loss_pct": 2.5,
-        "suggested_target_pct": 5.0,
+        "suggested_entry_zone": "2840–2855",
+        "suggested_stop_loss_pct": 0.5,
+        "suggested_target_pct": 1.2,
+        "expected_range_pct": 1.8,
         "volume_signal": "ABOVE_AVG",
         "confidence": 0.65,
         "reasoning": "RSI oversold with volume confirmation.",
@@ -97,18 +99,20 @@ def _valid_pm_json(
     return json.dumps({
         "ticker": ticker,
         "decision": decision,
-        "decision_rationale": "",
+        "direction": "LONG",
+        "skip_reason": "" if decision == "BUY" else "LOW_CONFIDENCE",
         "quantity_shares": 20 if decision == "BUY" else 0,
         "estimated_trade_value_inr": 56810.0 if decision == "BUY" else 0.0,
-        "product_type": "CNC",
-        "horizon_days": 3,
+        "product_type": "MIS",
+        "entry_window": "09:15–09:30",
+        "squareoff_time": "15:15",
         "target_price": 2950.0 if decision == "BUY" else 0.0,
         "stop_loss_price": 2750.0 if decision == "BUY" else 0.0,
         "confidence": confidence,
         "primary_thesis": "Oversold RSI + Q4 beat.",
-        "kill_conditions": ["Close below 200DMA"],
+        "intraday_exit_triggers": ["Nifty drops >0.8% from open"] if decision == "BUY" else [],
         "agent_agreement": "HIGH",
-        "estimated_cost_bps": 28.5,
+        "estimated_cost_bps": 13.0,
         "risk_reward_ratio": 2.1,
     })
 
@@ -125,7 +129,7 @@ class TestModelValidation:
     def test_technical_valid(self):
         output = TechnicalOutput.model_validate_json(_valid_technical_json())
         assert output.technical_signal == "BUY"
-        assert output.trend == "UPTREND"
+        assert output.intraday_bias == "GAP_UP_CONTINUATION"
 
     def test_fundamentals_valid(self):
         output = FundamentalsOutput.model_validate_json(_valid_fundamentals_json())
@@ -184,18 +188,19 @@ class TestJsonExtraction:
         assert result["ticker"] == "INFY"
 
 
-# ── pm_hold_fallback tests ───────────────────────────────────────────────────
+# ── pm_skip_fallback tests ───────────────────────────────────────────────────
 
-class TestPMHoldFallback:
+class TestPMSkipFallback:
     def test_fallback_structure(self):
-        fallback = pm_hold_fallback("RELIANCE")
-        assert fallback.decision == "HOLD"
+        fallback = pm_skip_fallback("RELIANCE")
+        assert fallback.decision == "SKIP"
         assert fallback.quantity_shares == 0
         assert fallback.confidence == 0.0
         assert fallback.ticker == "RELIANCE"
+        assert fallback.product_type == "MIS"
 
     def test_fallback_is_valid_pydantic(self):
-        fallback = pm_hold_fallback("TCS")
+        fallback = pm_skip_fallback("TCS")
         assert isinstance(fallback, PMDecision)
 
 
@@ -209,7 +214,7 @@ class TestPMSchemaValidation:
         pm = PMDecision.model_validate_json(raw)
         assert pm.decision == "BUY"
         assert pm.ticker == "ICICIBANK"
-        assert pm.product_type == "CNC"
+        assert pm.product_type == "MIS"
 
     def test_pm_schema_error_triggers_retry(self):
         """
@@ -219,7 +224,7 @@ class TestPMSchemaValidation:
         call_count = 0
         responses = [
             ("not valid json {{{}}", _mock_usage()),  # first call: garbage
-            (_valid_pm_json("TCS", "HOLD", 0.60), _mock_usage()),  # second: valid
+            (_valid_pm_json("TCS", "SKIP", 0.60), _mock_usage()),  # second: valid
         ]
 
         def fake_call():
@@ -232,6 +237,7 @@ class TestPMSchemaValidation:
             agent = BaseAgent.__new__(BaseAgent)
             agent.name = "portfolio_manager"
             agent.model = "claude-haiku-4-5"
+            agent.settings = MagicMock(agent_schema_retry_enabled=True)
 
         def parse_fn(text: str) -> PMDecision:
             return BaseAgent._parse_output(agent, text, PMDecision)
@@ -239,7 +245,7 @@ class TestPMSchemaValidation:
         result, usage, valid = agent._call_with_retry(fake_call, parse_fn, max_retries=1)
         assert valid is True
         assert result is not None
-        assert result.decision == "HOLD"
+        assert result.decision == "SKIP"
         assert call_count == 2  # retried exactly once
 
     def test_both_retries_fail_returns_none(self):
@@ -251,6 +257,7 @@ class TestPMSchemaValidation:
             agent = BaseAgent.__new__(BaseAgent)
             agent.name = "test"
             agent.model = "claude-haiku-4-5"
+            agent.settings = MagicMock(agent_schema_retry_enabled=True)
 
         def parse_fn(text: str) -> PMDecision:
             return BaseAgent._parse_output(agent, text, PMDecision)
@@ -295,27 +302,30 @@ class TestQuietSkipLogic:
 
 class TestCircuitBreakerDrawdown:
     """
-    When portfolio drawdown >= 10%, PM must only output EXIT or HOLD.
-    We test this by asserting the PM prompt message includes the constraint,
-    and separately test the decision validator via a mock.
+    When portfolio drawdown >= 5%, PM must output SKIP — no new BUY entries.
+    We test this by asserting the circuit-breaker enforcement logic directly.
     """
 
     def _enforce_drawdown_rule(self, decision: str, drawdown_pct: float) -> str:
         """Mimic the circuit-breaker enforcement the orchestrator applies."""
-        if drawdown_pct >= 10.0 and decision == "BUY":
-            return "HOLD"
+        if drawdown_pct >= 5.0 and decision == "BUY":
+            return "SKIP"
         return decision
 
-    def test_buy_blocked_when_drawdown_gte_10(self):
-        result = self._enforce_drawdown_rule("BUY", 10.5)
-        assert result == "HOLD"
+    def test_buy_blocked_when_drawdown_gte_5(self):
+        result = self._enforce_drawdown_rule("BUY", 5.0)
+        assert result == "SKIP"
 
-    def test_exit_allowed_when_drawdown_gte_10(self):
-        result = self._enforce_drawdown_rule("EXIT", 12.0)
-        assert result == "EXIT"
+    def test_buy_blocked_when_drawdown_gt_5(self):
+        result = self._enforce_drawdown_rule("BUY", 7.5)
+        assert result == "SKIP"
 
-    def test_buy_allowed_when_drawdown_lt_10(self):
-        result = self._enforce_drawdown_rule("BUY", 8.0)
+    def test_skip_passthrough_when_drawdown_gte_5(self):
+        result = self._enforce_drawdown_rule("SKIP", 6.0)
+        assert result == "SKIP"
+
+    def test_buy_allowed_when_drawdown_lt_5(self):
+        result = self._enforce_drawdown_rule("BUY", 4.9)
         assert result == "BUY"
 
 
@@ -341,36 +351,36 @@ class TestRestrictedTickerSkip:
 class TestPMSelfConsistency:
     """
     PM runs 3 Haiku samples and takes majority vote.
-    Test that 2x BUY + 1x HOLD → BUY wins.
+    Test that 2x BUY + 1x SKIP → BUY wins.
     """
 
     def test_majority_vote_buy_wins(self):
         decisions = [
             PMDecision.model_validate_json(_valid_pm_json("RELIANCE", "BUY", 0.70)),
             PMDecision.model_validate_json(_valid_pm_json("RELIANCE", "BUY", 0.65)),
-            PMDecision.model_validate_json(_valid_pm_json("RELIANCE", "HOLD", 0.45)),
+            PMDecision.model_validate_json(_valid_pm_json("RELIANCE", "SKIP", 0.45)),
         ]
         from collections import Counter
         vote_counts = Counter(d.decision for d in decisions)
         winner = vote_counts.most_common(1)[0][0]
         assert winner == "BUY"
 
-    def test_majority_vote_hold_wins(self):
+    def test_majority_vote_skip_wins(self):
         decisions = [
-            PMDecision.model_validate_json(_valid_pm_json("TCS", "HOLD", 0.50)),
-            PMDecision.model_validate_json(_valid_pm_json("TCS", "HOLD", 0.48)),
+            PMDecision.model_validate_json(_valid_pm_json("TCS", "SKIP", 0.50)),
+            PMDecision.model_validate_json(_valid_pm_json("TCS", "SKIP", 0.48)),
             PMDecision.model_validate_json(_valid_pm_json("TCS", "BUY", 0.72)),
         ]
         from collections import Counter
         vote_counts = Counter(d.decision for d in decisions)
         winner = vote_counts.most_common(1)[0][0]
-        assert winner == "HOLD"
+        assert winner == "SKIP"
 
     def test_escalation_threshold(self):
         """avg confidence < 0.50 → should escalate to Sonnet."""
         decisions = [
-            PMDecision.model_validate_json(_valid_pm_json("INFY", "HOLD", 0.40)),
-            PMDecision.model_validate_json(_valid_pm_json("INFY", "HOLD", 0.42)),
+            PMDecision.model_validate_json(_valid_pm_json("INFY", "SKIP", 0.40)),
+            PMDecision.model_validate_json(_valid_pm_json("INFY", "SKIP", 0.42)),
             PMDecision.model_validate_json(_valid_pm_json("INFY", "BUY", 0.45)),
         ]
         avg_conf = sum(d.confidence for d in decisions) / len(decisions)
