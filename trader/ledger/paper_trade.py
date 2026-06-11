@@ -65,7 +65,7 @@ class SimulatedFill:
     slippage_inr: float
     total_cost_inr: float     # regulatory + slippage
     cost_bps: float           # total / trade_value × 10000
-    product_type: str         # always "CNC" in Phase 1
+    product_type: str         # always "MIS" — CNC is forbidden in Phase 1
     trade_id: str
     trade_date: str           # "yyyy-mm-dd"
 
@@ -275,7 +275,7 @@ class PaperTradingLedger:
         slippage_inr = float(slippage_amount(trade_value, bps=slippage_bps))
 
         side = "BUY" if decision == "BUY" else "SELL"
-        cost_breakdown = calculate_trade_cost(trade_value, TradeType.DELIVERY, side)
+        cost_breakdown = calculate_trade_cost(trade_value, TradeType.INTRADAY, side)
         regulatory_cost = float(cost_breakdown.total)
         total_cost = regulatory_cost + slippage_inr
         cost_bps = (total_cost / trade_value * 10_000) if trade_value > 0 else 0.0
@@ -290,7 +290,7 @@ class PaperTradingLedger:
             slippage_inr=round(slippage_inr, 2),
             total_cost_inr=round(total_cost, 2),
             cost_bps=round(cost_bps, 2),
-            product_type="CNC",
+            product_type="MIS",
             trade_id=str(uuid.uuid4()),
             trade_date=self.trade_date,
         )
