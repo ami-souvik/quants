@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pytest
 
+from trader.config.settings import get_settings
 from trader.ledger.circuit_breaker import (
     CircuitBreakerStatus,
     check_circuit_breakers,
@@ -297,12 +298,14 @@ class TestCircuitBreakers:
             }
         }
 
-    def test_drawdown_triggered_at_10pct(self):
+    def test_drawdown_triggered_at_5pct(self, monkeypatch):
+        """Intraday daily drawdown breaker fires at >= 5% of opening NAV."""
+        monkeypatch.setattr(get_settings(), "circuit_breaker_drawdown", 0.05)
         status = check_circuit_breakers(
             ticker="RELIANCE",
             ticker_sector="Energy",
             is_restricted=False,
-            drawdown_pct=10.5,       # ≥10%
+            drawdown_pct=5.5,        # ≥5%
             nav_inr=1_000_000.0,
             positions={},
             daily_llm_cost_usd=0.0,
@@ -310,12 +313,13 @@ class TestCircuitBreakers:
         assert status.drawdown_triggered is True
         assert status.blocks_new_buy is True
 
-    def test_drawdown_not_triggered_below_10pct(self):
+    def test_drawdown_not_triggered_below_5pct(self, monkeypatch):
+        monkeypatch.setattr(get_settings(), "circuit_breaker_drawdown", 0.05)
         status = check_circuit_breakers(
             ticker="RELIANCE",
             ticker_sector="Energy",
             is_restricted=False,
-            drawdown_pct=9.9,
+            drawdown_pct=4.9,
             nav_inr=1_000_000.0,
             positions={},
             daily_llm_cost_usd=0.0,

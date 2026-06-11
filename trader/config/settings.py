@@ -5,6 +5,7 @@ In production: reads from AWS Secrets Manager (secrets injected via ECS task def
 """
 import json
 import logging
+from datetime import time
 from functools import lru_cache
 from typing import Literal
 
@@ -89,14 +90,21 @@ class Settings(BaseSettings):
         description="Model for Agent 5 escalation when confidence < threshold",
     )
 
-    # App behaviour
+    # App behaviour — intraday MIS pivot
     paper_trading_mode: bool = Field(default=True)
     initial_capital_inr: float = Field(default=1_000_000.0)
     max_position_pct: float = Field(default=0.15)
-    max_open_positions: int = Field(default=5)
-    max_hold_days: int = Field(default=5)
-    circuit_breaker_drawdown: float = Field(default=0.10)
+    max_open_positions: int = Field(default=5, description="Max concurrent intraday positions")
+    # Hard square-off time: all open MIS positions are closed at this IST time, no exceptions.
+    squareoff_time_ist: str = Field(default="15:15", description="Mandatory MIS square-off time (IST, HH:MM)")
+    # No new entries after this IST time — avoids late-day illiquidity.
+    entry_cutoff_time_ist: str = Field(default="11:00", description="Latest entry time for new intraday positions (IST, HH:MM)")
+    # Daily drawdown halt: realised + unrealised loss vs opening NAV. Tighter than the
+    # old 10% delivery threshold because intraday losses compound fast.
+    circuit_breaker_drawdown: float = Field(default=0.05)
     daily_llm_budget_usd: float = Field(default=1.00)
+    # DEPRECATED (delivery-era): unused once the MIS ledger lands; removed with paper_trade pivot.
+    max_hold_days: int = Field(default=5)
 
     # FastAPI
     api_key: str = Field(default="changeme-local-dev")
@@ -126,12 +134,28 @@ class Settings(BaseSettings):
     @field_validator("paper_trading_mode")
     @classmethod
     def paper_mode_must_be_true_in_phase1(cls, v: bool) -> bool:
-        # Enforcement is done at runtime in daily_run.py; here we just pass through.
+        # Enforcement is done at runtime in the run entry points; here we just pass through.
+        return v
+
+    @field_validator("squareoff_time_ist", "entry_cutoff_time_ist")
+    @classmethod
+    def validate_hhmm(cls, v: str) -> str:
+        time.fromisoformat(v)  # raises ValueError on bad format
         return v
 
     @property
     def max_position_value_inr(self) -> float:
         return self.initial_capital_inr * self.max_position_pct
+
+    @property
+    def squareoff_time(self) -> time:
+        """Square-off deadline as a datetime.time (IST wall-clock)."""
+        return time.fromisoformat(self.squareoff_time_ist)
+
+    @property
+    def entry_cutoff_time(self) -> time:
+        """Entry cutoff as a datetime.time (IST wall-clock)."""
+        return time.fromisoformat(self.entry_cutoff_time_ist)
 
 
 def _load_secret(secret_name: str, region: str) -> dict:
