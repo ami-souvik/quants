@@ -229,6 +229,35 @@ class LogsResponse(BaseModel):
     has_error: bool
 
 
+class LogSession(BaseModel):
+    """One S3 log object = one run session (CloudWatch log stream equivalent)."""
+    key: str                # full S3 object key
+    run_datetime: str       # ISO datetime inferred from key, e.g. "2026-06-13T17:05:32"
+    size_bytes: int = 0
+    last_modified: str = ""
+    # summary stats (computed when listing)
+    line_count: int = 0
+    error_count: int = 0
+    warning_count: int = 0
+    has_error: bool = False
+
+
+class LogSessionsResponse(BaseModel):
+    date: str
+    sessions: list[LogSession]
+    total: int
+
+
+class LogSessionDetailResponse(BaseModel):
+    key: str
+    run_datetime: str
+    lines: list[LogLine]
+    total: int
+    error_count: int
+    warning_count: int
+    has_error: bool
+
+
 # ─── Performance analytics ────────────────────────────────────────────────────
 
 class PerformanceAnalyticsResponse(BaseModel):

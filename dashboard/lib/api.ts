@@ -96,6 +96,33 @@ export interface LogsResponse {
   has_error: boolean;
 }
 
+export interface LogSession {
+  key: string;
+  run_datetime: string;
+  size_bytes: number;
+  last_modified: string;
+  line_count: number;
+  error_count: number;
+  warning_count: number;
+  has_error: boolean;
+}
+
+export interface LogSessionsResponse {
+  date: string;
+  sessions: LogSession[];
+  total: number;
+}
+
+export interface LogSessionDetailResponse {
+  key: string;
+  run_datetime: string;
+  lines: LogLine[];
+  total: number;
+  error_count: number;
+  warning_count: number;
+  has_error: boolean;
+}
+
 export interface AgentDecisionDetail {
   agent: string;
   model: string | null;
@@ -339,6 +366,12 @@ export const api = {
 
   logs: (date?: string) =>
     apiFetch<LogsResponse>(`/api/logs${date ? `?date=${date}` : ""}`),
+
+  logSessions: (date?: string) =>
+    apiFetch<LogSessionsResponse>(`/api/logs/sessions${date ? `?date=${date}` : ""}`),
+
+  logSession: (key: string) =>
+    apiFetch<LogSessionDetailResponse>(`/api/logs/session?key=${encodeURIComponent(key)}`),
 
   report: (date?: string) =>
     apiFetch<DailyReportResponse>(`/api/report${date ? `?date=${date}` : ""}`),

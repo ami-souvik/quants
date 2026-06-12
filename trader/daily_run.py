@@ -78,15 +78,18 @@ def main() -> int:
     else:
         trade_date = datetime.now(IST).date().isoformat()
 
+    run_started_at = datetime.now(IST).isoformat()
     logger.info("Paper trading run starting for %s (dry_run=%s)", trade_date, dry_run)
 
     try:
         run_state = run_daily(trade_date)
     except KeyboardInterrupt:
         logger.info("Run interrupted by user.")
+        _upload_log(_log_file, run_started_at)
         return 0
     except Exception as e:
         logger.exception("Daily run failed with unhandled exception: %s", e)
+        _upload_log(_log_file, run_started_at)
         return 1
 
     completed = run_state.get("completed_at")
@@ -96,7 +99,21 @@ def main() -> int:
     if cost > 1.00:
         logger.warning("Daily LLM cost $%.4f exceeds $1.00 budget — review model usage.", cost)
 
+    # Upload the completed log file to S3 so the dashboard can retrieve it.
+    # Uses run_started_at (not completed_at) as the timestamp — this makes the
+    # S3 key stable even if the run is retried, since started_at is set once.
+    _upload_log(_log_file, run_started_at)
+
     return 0
+
+
+def _upload_log(log_file: str, run_started_at: str) -> None:
+    """Upload the local log file to S3. Non-fatal — logs errors but never raises."""
+    try:
+        from trader.storage.s3 import upload_log
+        upload_log(log_file, run_started_at)
+    except Exception as exc:
+        logger.error("Log S3 upload failed: %s", exc)
 
 
 if __name__ == "__main__":
