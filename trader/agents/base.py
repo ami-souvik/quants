@@ -330,8 +330,42 @@ class BaseAgent:
             generation_config=generation_config,
         )
 
+        # Retry transient Gemini server errors with exponential backoff.
+        # InternalServerError (500), ServiceUnavailable (503), and
+        # ResourceExhausted (429) are all safe to retry — they're transient.
+        # We import lazily so the module still loads when google-genai is absent.
+        try:
+            from google.api_core.exceptions import (
+                InternalServerError as _GoogInternal,
+                ServiceUnavailable as _GoogUnavailable,
+                ResourceExhausted as _GoogRateLimit,
+            )
+            _GEMINI_TRANSIENT = (_GoogInternal, _GoogUnavailable, _GoogRateLimit)
+        except ImportError:
+            _GEMINI_TRANSIENT = ()  # type: ignore[assignment]
+
+        _MAX_GEMINI_RETRIES = 3
+        _BACKOFF_BASE = 2.0  # seconds; doubles each attempt
+
         start = time.monotonic()
-        response = client.generate_content(user_message)
+        last_gemini_exc: Exception | None = None
+        response = None
+        for _attempt in range(_MAX_GEMINI_RETRIES):
+            try:
+                response = client.generate_content(user_message)
+                break  # success
+            except _GEMINI_TRANSIENT as exc:  # type: ignore[misc]
+                last_gemini_exc = exc
+                wait = _BACKOFF_BASE ** _attempt
+                logger.warning(
+                    "[%s] Gemini transient error (attempt %d/%d): %s — retrying in %.0fs",
+                    self.name, _attempt + 1, _MAX_GEMINI_RETRIES, exc, wait,
+                )
+                time.sleep(wait)
+        else:
+            # All retries exhausted — re-raise so _call_with_retry can handle it
+            raise last_gemini_exc  # type: ignore[misc]
+
         elapsed_ms = int((time.monotonic() - start) * 1000)
 
         text = response.text
@@ -565,6 +599,25 @@ class BaseAgent:
         total_usage = TokenUsage(agent=self.name, model=self.model)
         last_exc: Exception | None = None
 
+        # Transient API errors (Gemini 500/503/429, Anthropic 529, network issues)
+        # are caught here as a safety net — _call_gemini already retries them
+        # internally, but if all inner retries fail the exception surfaces here.
+        try:
+            from google.api_core.exceptions import GoogleAPICallError as _GoogAPIError
+        except ImportError:
+            _GoogAPIError = None  # type: ignore[assignment,misc]
+
+        def _is_transient(exc: Exception) -> bool:
+            if _GoogAPIError and isinstance(exc, _GoogAPIError):
+                return True
+            # Anthropic / httpx network errors
+            name = type(exc).__name__
+            return name in (
+                "APIStatusError", "APIConnectionError", "APITimeoutError",
+                "InternalServerError", "ServiceUnavailable", "RateLimitError",
+                "ConnectError", "TimeoutException",
+            )
+
         for attempt in range(effective_max_retries + 1):
             try:
                 text, usage = call_fn()
@@ -594,6 +647,29 @@ class BaseAgent:
                     effective_max_retries + 1,
                     exc,
                 )
+
+            except Exception as exc:
+                last_exc = exc
+                if _is_transient(exc):
+                    # Inner retry loop in _call_gemini already attempted backoff;
+                    # this is the final fallback log before returning HOLD.
+                    logger.error(
+                        "[%s] Transient API error after all retries (attempt %d/%d): %s",
+                        self.name,
+                        attempt + 1,
+                        effective_max_retries + 1,
+                        exc,
+                    )
+                else:
+                    # Unexpected error — log full traceback and bail immediately.
+                    logger.exception(
+                        "[%s] Unexpected error calling LLM (attempt %d/%d): %s",
+                        self.name,
+                        attempt + 1,
+                        effective_max_retries + 1,
+                        exc,
+                    )
+                    break  # don't retry unexpected errors
 
         logger.error("[%s] All retries exhausted. Last error: %s", self.name, last_exc)
         return None, total_usage, False
