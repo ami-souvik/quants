@@ -275,7 +275,7 @@ class BaseAgent:
         response_model: type[T] | None = None,
     ) -> tuple[str, TokenUsage]:
         """
-        Call Google Gemini API.
+        Call Google Gemini API via the `google.genai` SDK (v1.x).
 
         Key configuration choices
         ─────────────────────────
@@ -295,73 +295,64 @@ class BaseAgent:
             Our largest agent output (PM decision) is ~300 tokens. 2048 gives
             ample headroom without wasting quota.
         """
-        import google.generativeai as genai
+        from google import genai
+        from google.genai import types
+        from google.genai.errors import APIError as _GeminiAPIError
 
         raw_model = (model or self.model).replace("google/", "")
-        genai.configure(api_key=self.settings.gemini_api_key)
+        client = genai.Client(api_key=self.settings.gemini_api_key)
 
-        # Build generation config — disable thinking for 2.x models
-        gen_config: dict = {
+        # Build GenerateContentConfig for the new SDK
+        config_kwargs: dict = {
             "temperature":        temperature,
             "max_output_tokens":  2048,
             "response_mime_type": "application/json",
+            "system_instruction": self._system_prompt,
         }
         if response_model is not None:
             # Gemini only supports a subset of JSON Schema — strip unsupported
             # keywords (minimum, maximum, maxItems, default, title, $ref, etc.)
             # before passing. The cleaned dict is fully inlined (no $ref/$defs).
-            gen_config["response_schema"] = _pydantic_to_gemini_schema(response_model)
+            config_kwargs["response_schema"] = _pydantic_to_gemini_schema(response_model)
         if any(v in raw_model for v in ("2.5", "2.0")):
             # thinking_budget=0 disables CoT for Gemini 2.x thinking models.
-            # Try with thinking_config first; fall back silently for older SDK versions
-            # where GenerationConfig doesn't accept that keyword.
-            gen_config["thinking_config"] = {"thinking_budget": 0}
+            config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
 
-        try:
-            generation_config = genai.GenerationConfig(**gen_config)
-        except TypeError:
-            # Older google-generativeai SDK doesn't support thinking_config
-            gen_config.pop("thinking_config", None)
-            generation_config = genai.GenerationConfig(**gen_config)
+        gen_config = types.GenerateContentConfig(**config_kwargs)
 
-        client = genai.GenerativeModel(
-            model_name=raw_model,
-            system_instruction=self._system_prompt,
-            generation_config=generation_config,
-        )
-
-        # Retry transient Gemini server errors with exponential backoff.
-        # InternalServerError (500), ServiceUnavailable (503), and
-        # ResourceExhausted (429) are all safe to retry — they're transient.
-        # We import lazily so the module still loads when google-genai is absent.
-        try:
-            from google.api_core.exceptions import (
-                InternalServerError as _GoogInternal,
-                ServiceUnavailable as _GoogUnavailable,
-                ResourceExhausted as _GoogRateLimit,
-            )
-            _GEMINI_TRANSIENT = (_GoogInternal, _GoogUnavailable, _GoogRateLimit)
-        except ImportError:
-            _GEMINI_TRANSIENT = ()  # type: ignore[assignment]
-
+        # Retry transient Gemini server errors (500/503/429) with exponential backoff.
         _MAX_GEMINI_RETRIES = 3
-        _BACKOFF_BASE = 2.0  # seconds; doubles each attempt
+        _BACKOFF_BASE = 2.0  # seconds; doubles each attempt: 2s → 4s → 8s
+
+        _TRANSIENT_CODES = {500, 503, 429}
+
+        def _is_transient_gemini(exc: Exception) -> bool:
+            if isinstance(exc, _GeminiAPIError):
+                return getattr(exc, "code", None) in _TRANSIENT_CODES
+            return False
 
         start = time.monotonic()
         last_gemini_exc: Exception | None = None
         response = None
         for _attempt in range(_MAX_GEMINI_RETRIES):
             try:
-                response = client.generate_content(user_message)
-                break  # success
-            except _GEMINI_TRANSIENT as exc:  # type: ignore[misc]
-                last_gemini_exc = exc
-                wait = _BACKOFF_BASE ** _attempt
-                logger.warning(
-                    "[%s] Gemini transient error (attempt %d/%d): %s — retrying in %.0fs",
-                    self.name, _attempt + 1, _MAX_GEMINI_RETRIES, exc, wait,
+                response = client.models.generate_content(
+                    model=raw_model,
+                    contents=user_message,
+                    config=gen_config,
                 )
-                time.sleep(wait)
+                break  # success
+            except Exception as exc:
+                if _is_transient_gemini(exc):
+                    last_gemini_exc = exc
+                    wait = _BACKOFF_BASE ** _attempt
+                    logger.warning(
+                        "[%s] Gemini transient error (attempt %d/%d): %s — retrying in %.0fs",
+                        self.name, _attempt + 1, _MAX_GEMINI_RETRIES, exc, wait,
+                    )
+                    time.sleep(wait)
+                else:
+                    raise  # non-transient: propagate immediately
         else:
             # All retries exhausted — re-raise so _call_with_retry can handle it
             raise last_gemini_exc  # type: ignore[misc]
@@ -370,10 +361,10 @@ class BaseAgent:
 
         text = response.text
         metadata = getattr(response, "usage_metadata", None)
-        input_tokens  = getattr(metadata, "prompt_token_count",      0) or 0
-        output_tokens = getattr(metadata, "candidates_token_count",   0) or 0
-        # thoughts_tokens is non-zero when thinking is active (should be 0 now)
-        thought_tokens = getattr(metadata, "thoughts_token_count",   0) or 0
+        input_tokens   = getattr(metadata, "prompt_token_count",      0) or 0
+        output_tokens  = getattr(metadata, "candidates_token_count",  0) or 0
+        # thoughts_token_count is non-zero when thinking is active (should be 0 now)
+        thought_tokens = getattr(metadata, "thoughts_token_count",    0) or 0
         if thought_tokens:
             logger.debug("[%s] %s — thinking tokens: %d", self.name, raw_model, thought_tokens)
 
@@ -603,12 +594,12 @@ class BaseAgent:
         # are caught here as a safety net — _call_gemini already retries them
         # internally, but if all inner retries fail the exception surfaces here.
         try:
-            from google.api_core.exceptions import GoogleAPICallError as _GoogAPIError
+            from google.genai.errors import APIError as _GeminiAPIError
         except ImportError:
-            _GoogAPIError = None  # type: ignore[assignment,misc]
+            _GeminiAPIError = None  # type: ignore[assignment,misc]
 
         def _is_transient(exc: Exception) -> bool:
-            if _GoogAPIError and isinstance(exc, _GoogAPIError):
+            if _GeminiAPIError and isinstance(exc, _GeminiAPIError):
                 return True
             # Anthropic / httpx network errors
             name = type(exc).__name__
