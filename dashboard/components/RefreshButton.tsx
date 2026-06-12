@@ -16,12 +16,9 @@ export function RefreshButton() {
   return (
     <button
       onClick={handleRefresh}
-      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-border text-subtle text-xs hover:text-text hover:border-accent/50 transition-colors"
+      className="flex items-center gap-2 px-4 py-2 text-[12px] text-muted hover:text-text border border-border hover:border-subtle transition-colors"
     >
-      <RefreshCw
-        size={12}
-        className={spinning ? "animate-spin" : ""}
-      />
+      <RefreshCw size={11} className={spinning ? "animate-spin" : ""} />
       Refresh
     </button>
   );

@@ -6,7 +6,6 @@ import {
   YAxis,
   CartesianGrid,
   Tooltip,
-  Legend,
   ResponsiveContainer,
 } from "recharts";
 import { DailyNavPoint, BenchmarkPoint, formatINR } from "@/lib/api";
@@ -29,7 +28,6 @@ function shortDate(isoDate: string): string {
 }
 
 export function NavChart({ navPoints, niftyPoints, initialCapital }: Props) {
-  // Merge nav + nifty into one series by date
   const niftyMap = new Map(niftyPoints.map((p) => [p.date, p.nav]));
 
   const data: ChartPoint[] = navPoints.map((p) => ({
@@ -40,64 +38,61 @@ export function NavChart({ navPoints, niftyPoints, initialCapital }: Props) {
 
   if (data.length === 0) {
     return (
-      <div className="flex items-center justify-center h-64 text-subtle text-sm">
+      <div className="flex items-center justify-center h-64 text-muted text-sm">
         No NAV data yet — first run will populate this chart.
       </div>
     );
   }
 
   return (
-    <ResponsiveContainer width="100%" height={300}>
-      <LineChart data={data} margin={{ top: 4, right: 16, bottom: 4, left: 16 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="#2d3142" />
+    <ResponsiveContainer width="100%" height={260}>
+      <LineChart data={data} margin={{ top: 4, right: 4, bottom: 4, left: 8 }}>
+        <CartesianGrid strokeDasharray="2 4" stroke="#222222" vertical={false} />
         <XAxis
           dataKey="date"
-          tick={{ fill: "#94a3b8", fontSize: 11 }}
-          axisLine={{ stroke: "#2d3142" }}
+          tick={{ fill: "#666666", fontSize: 10, fontFamily: "Inter, sans-serif" }}
+          axisLine={false}
           tickLine={false}
+          dy={6}
         />
         <YAxis
           tickFormatter={(v) => formatINR(v)}
-          tick={{ fill: "#94a3b8", fontSize: 11 }}
-          axisLine={{ stroke: "#2d3142" }}
+          tick={{ fill: "#666666", fontSize: 10, fontFamily: "Inter, sans-serif" }}
+          axisLine={false}
           tickLine={false}
           width={80}
         />
         <Tooltip
           contentStyle={{
-            backgroundColor: "#1a1d27",
-            border: "1px solid #2d3142",
-            borderRadius: 8,
-            color: "#e2e8f0",
-            fontSize: 12,
+            backgroundColor: "#1a1a1a",
+            border: "1px solid #2a2a2a",
+            borderRadius: 0,
+            color: "#f0f0f0",
+            fontSize: 11,
+            fontFamily: "Inter, sans-serif",
           }}
           formatter={(value: number, name: string) => [
             formatINR(value, 0),
-            name === "portfolio" ? "Portfolio NAV" : "Nifty 50 TRI",
+            name === "portfolio" ? "Portfolio" : "Nifty 50 TRI",
           ]}
-        />
-        <Legend
-          formatter={(value) =>
-            value === "portfolio" ? "Portfolio NAV" : "Nifty 50 TRI"
-          }
-          wrapperStyle={{ color: "#94a3b8", fontSize: 12 }}
+          labelStyle={{ color: "#999999", marginBottom: 4 }}
         />
         <Line
           type="monotone"
           dataKey="portfolio"
-          stroke="#6366f1"
+          stroke="#c8c0a8"
           strokeWidth={2}
           dot={false}
-          activeDot={{ r: 4, fill: "#6366f1" }}
+          activeDot={{ r: 4, fill: "#c8c0a8", stroke: "#c8c0a8" }}
         />
         <Line
           type="monotone"
           dataKey="nifty"
-          stroke="#f59e0b"
+          stroke="#444444"
           strokeWidth={1.5}
-          strokeDasharray="5 3"
+          strokeDasharray="4 4"
           dot={false}
-          activeDot={{ r: 3, fill: "#f59e0b" }}
+          activeDot={{ r: 3, fill: "#666666", stroke: "#666666" }}
         />
       </LineChart>
     </ResponsiveContainer>

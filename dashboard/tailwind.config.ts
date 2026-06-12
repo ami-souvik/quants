@@ -9,19 +9,20 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        // Trading terminal palette
-        bg:       "#0f1117",
-        surface:  "#1a1d27",
-        border:   "#2d3142",
-        muted:    "#4a5068",
-        text:     "#e2e8f0",
-        subtle:   "#94a3b8",
-        bull:     "#22c55e",  // green — bullish / profit
-        bear:     "#ef4444",  // red   — bearish / loss
-        gold:     "#f59e0b",  // amber — warning / neutral
-        accent:   "#6366f1",  // indigo — brand accent
+        // Fontshare-inspired dark palette
+        bg:       "#0f0f0f",
+        surface:  "#181818",
+        surface2: "#222222",
+        border:   "#2a2a2a",
+        "border-light": "#222222",
+        text:     "#f0f0f0",
+        muted:    "#666666",
+        subtle:   "#999999",
+        accent:   "#c8c0a8",   // warm beige — active/highlight state
+        "accent-fg": "#111111", // text on accent background
       },
       fontFamily: {
+        sans: ["'Inter'", "-apple-system", "BlinkMacSystemFont", "sans-serif"],
         mono: ["'JetBrains Mono'", "Menlo", "monospace"],
       },
     },

@@ -1,5 +1,4 @@
-import { PositionResponse, formatINR, formatPct, pnlColor } from "@/lib/api";
-import clsx from "clsx";
+import { PositionResponse, formatINR } from "@/lib/api";
 
 interface Props {
   positions: PositionResponse[];
@@ -10,120 +9,99 @@ interface Props {
 export function PositionsTable({ positions, openCount, maxPositions }: Props) {
   if (positions.length === 0) {
     return (
-      <div className="text-center py-8 text-subtle text-sm">
-        No open positions — portfolio is in cash.
+      <div className="py-14 text-center">
+        <p className="text-4xl font-semibold text-surface2 mb-2">FLAT</p>
+        <p className="text-[12px] text-muted">
+          All positions squared off · Portfolio in cash
+        </p>
       </div>
     );
   }
 
   return (
     <div className="overflow-x-auto">
-      <table className="w-full text-sm">
+      <table className="w-full">
         <thead>
-          <tr className="text-left text-subtle border-b border-border">
-            <th className="pb-2 pr-4 font-medium">Ticker</th>
-            <th className="pb-2 pr-4 font-medium text-right">Qty</th>
-            <th className="pb-2 pr-4 font-medium text-right">Avg Price</th>
-            <th className="pb-2 pr-4 font-medium text-right">Stop Loss</th>
-            <th className="pb-2 pr-4 font-medium text-right">Target</th>
-            <th className="pb-2 pr-4 font-medium text-right">Days Held</th>
-            <th className="pb-2 pr-4 font-medium text-right">P&amp;L</th>
-            <th className="pb-2 font-medium">Sector</th>
+          <tr className="border-b border-border">
+            {["Ticker", "Qty", "Entry", "Stop", "Target", "Time", "Unreal. P&L"].map(
+              (h, i) => (
+                <th
+                  key={h}
+                  className={`text-[11px] text-muted pb-3 font-normal tracking-wider uppercase ${
+                    i === 0 ? "text-left pr-6" : i === 6 ? "text-right" : "text-right pr-6"
+                  }`}
+                >
+                  {h}
+                </th>
+              )
+            )}
           </tr>
         </thead>
         <tbody>
           {positions.map((pos) => {
-            const daysBar = Math.min(pos.days_held / pos.horizon_days, 1);
-            const daysColor =
-              daysBar > 0.8
-                ? "bg-bear"
-                : daysBar > 0.5
-                ? "bg-gold"
-                : "bg-bull";
+            const pnl = pos.unrealized_pnl_pct;
+            const pnlPositive = pnl !== null && pnl >= 0;
 
             return (
               <tr
                 key={pos.ticker}
-                className="border-b border-border/50 hover:bg-surface/50 transition-colors"
+                className="border-b border-border hover:bg-surface transition-colors"
               >
-                {/* Ticker */}
-                <td className="py-3 pr-4">
-                  <div className="font-mono font-semibold text-text">
-                    {pos.ticker}
-                  </div>
-                  <div className="text-xs text-subtle">
-                    Entry {pos.entry_date}
-                  </div>
+                <td className="py-4 pr-6">
+                  <div className="font-mono font-semibold text-[13px] text-text">{pos.ticker}</div>
+                  <div className="text-[10px] text-muted mt-0.5">MIS · LONG</div>
                 </td>
-
-                {/* Qty */}
-                <td className="py-3 pr-4 text-right font-mono">{pos.qty}</td>
-
-                {/* Avg Price */}
-                <td className="py-3 pr-4 text-right font-mono">
+                <td className="py-4 pr-6 text-right font-mono text-[13px] text-text">{pos.qty}</td>
+                <td className="py-4 pr-6 text-right font-mono text-[13px]">
                   ₹{pos.avg_price.toLocaleString("en-IN", { maximumFractionDigits: 2 })}
                 </td>
-
-                {/* Stop Loss */}
-                <td className="py-3 pr-4 text-right font-mono text-bear">
+                <td className="py-4 pr-6 text-right font-mono text-[13px] text-muted">
                   ₹{pos.stop_loss_price.toLocaleString("en-IN", { maximumFractionDigits: 2 })}
                 </td>
-
-                {/* Target */}
-                <td className="py-3 pr-4 text-right font-mono text-bull">
+                <td className="py-4 pr-6 text-right font-mono text-[13px]">
                   ₹{pos.target_price.toLocaleString("en-IN", { maximumFractionDigits: 2 })}
                 </td>
-
-                {/* Days Held / horizon mini bar */}
-                <td className="py-3 pr-4 text-right">
-                  <div className="flex items-center justify-end gap-2">
-                    <span className="font-mono">
-                      {pos.days_held}/{pos.horizon_days}d
-                    </span>
-                    <div className="w-12 h-1.5 bg-border rounded-full overflow-hidden">
-                      <div
-                        className={clsx("h-full rounded-full transition-all", daysColor)}
-                        style={{ width: `${daysBar * 100}%` }}
-                      />
-                    </div>
+                <td className="py-4 pr-6 text-right">
+                  <div className="text-[12px] font-mono text-text">
+                    {(pos as any).entry_time_ist ?? "09:20"}
                   </div>
+                  <div className="text-[10px] text-muted">→ 15:15</div>
                 </td>
-
-                {/* Unrealised P&L */}
-                <td className="py-3 pr-4 text-right">
-                  {pos.unrealized_pnl_pct !== null ? (
-                    <span className={clsx("font-mono", pnlColor(pos.unrealized_pnl_pct))}>
-                      {formatPct(pos.unrealized_pnl_pct)}
+                <td className="py-4 text-right">
+                  {pnl !== null ? (
+                    <span
+                      className={`font-mono text-[13px] font-semibold px-2 py-0.5 ${
+                        pnlPositive
+                          ? "bg-accent text-accent-fg"
+                          : "text-muted border border-border"
+                      }`}
+                    >
+                      {pnlPositive ? "+" : ""}{pnl.toFixed(2)}%
                     </span>
                   ) : (
-                    <span className="text-subtle text-xs">—</span>
+                    <span className="text-muted text-xs">—</span>
                   )}
                 </td>
-
-                {/* Sector */}
-                <td className="py-3 text-subtle text-xs">{pos.sector}</td>
               </tr>
             );
           })}
         </tbody>
       </table>
 
-      {/* Slot usage */}
-      <div className="mt-3 flex items-center gap-2">
-        <span className="text-xs text-subtle">
-          Positions: {openCount} / {maxPositions}
-        </span>
-        <div className="flex gap-1">
+      {/* Slot dots */}
+      <div className="mt-5 flex items-center gap-3">
+        <span className="text-[11px] text-muted">Slots used</span>
+        <div className="flex gap-1.5">
           {Array.from({ length: maxPositions }, (_, i) => (
             <div
               key={i}
-              className={clsx(
-                "w-2 h-2 rounded-full",
-                i < openCount ? "bg-accent" : "bg-border"
-              )}
+              className={`w-2.5 h-2.5 border ${
+                i < openCount ? "bg-accent border-accent" : "border-border"
+              }`}
             />
           ))}
         </div>
+        <span className="text-[11px] font-mono text-muted">{openCount}/{maxPositions}</span>
       </div>
     </div>
   );
