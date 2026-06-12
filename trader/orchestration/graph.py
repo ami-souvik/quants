@@ -445,26 +445,61 @@ def _build_persist_dynamo_node(date_str: str):
 
 
 def archive_s3_node(state: dict) -> dict:
-    """Archive PM prompt/output blobs to S3 (best-effort; pipeline continues on failure)."""
+    """
+    Archive all agent outputs to S3 (best-effort; pipeline never fails here).
+
+    Writes per ticker per day:
+      decisions/{date}/{ticker}/agents.json    — all 5 agent outputs + tokens + errors
+      decisions/{date}/{ticker}/pm_output.json — PM only (backwards compat)
+    """
     from trader.config.settings import get_settings
     settings = get_settings()
     if settings.dry_run:
         return {}
 
+    import json
+    from trader.storage.s3 import upload_bytes
+
     ticker = state["ticker"]
-    pm = state.get("pm_output")
-    if not pm:
-        return {}
+    date_str = datetime.now(IST).date().isoformat()
 
+    # ── All 5 agent outputs in one document ───────────────────────────────────
+    agents_payload = {
+        "ticker": ticker,
+        "date": date_str,
+        "skip_reason": state.get("skip_reason"),
+        "errors": state.get("errors", []),
+        "processing_time_ms": state.get("processing_time_ms", 0),
+        "tokens_used": state.get("tokens_used", {}),
+        "agents": {
+            "news_sentiment":    state.get("news_output"),
+            "technical":         state.get("technical_output"),
+            "fundamentals":      state.get("fundamentals_output"),
+            "bull_bear":         state.get("bull_bear_output"),
+            "portfolio_manager": state.get("pm_output"),
+        },
+        "simulated_fill": state.get("simulated_fill"),
+    }
     try:
-        import json
-        from trader.storage.s3 import upload_bytes
-
-        date_str = datetime.now(IST).date().isoformat()
-        key = f"decisions/{date_str}/{ticker}/pm_output.json"
-        upload_bytes(key, json.dumps(pm, default=str).encode(), content_type="application/json")
+        upload_bytes(
+            f"decisions/{date_str}/{ticker}/agents.json",
+            json.dumps(agents_payload, default=str).encode(),
+            content_type="application/json",
+        )
     except Exception as e:
-        logger.warning("[%s] S3 archive failed (non-fatal): %s", ticker, e)
+        logger.warning("[%s] S3 agents.json archive failed (non-fatal): %s", ticker, e)
+
+    # ── PM output standalone (backwards compat) ───────────────────────────────
+    pm = state.get("pm_output")
+    if pm:
+        try:
+            upload_bytes(
+                f"decisions/{date_str}/{ticker}/pm_output.json",
+                json.dumps(pm, default=str).encode(),
+                content_type="application/json",
+            )
+        except Exception as e:
+            logger.warning("[%s] S3 pm_output.json archive failed (non-fatal): %s", ticker, e)
 
     return {}
 

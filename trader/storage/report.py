@@ -172,12 +172,31 @@ def build_report(
 
 
 def persist_report(report: dict) -> None:
-    """Write the report to DynamoDB. Logs but does not raise on failure."""
+    """Write the report to DynamoDB and archive a full copy to S3."""
+    # DynamoDB — primary store (used by the API)
     try:
         dynamo.put_item(dynamo._table(), report)
-        logger.info("Daily report persisted for %s", report.get("run_date"))
+        logger.info("Daily report persisted to DynamoDB for %s", report.get("run_date"))
     except Exception as e:
-        logger.error("Failed to persist daily report: %s", e)
+        logger.error("Failed to persist daily report to DynamoDB: %s", e)
+
+    # S3 — full JSON archive (DynamoDB strips Decimal precision; S3 keeps the raw dict)
+    try:
+        import json
+        from trader.config.settings import get_settings
+        from trader.storage.s3 import upload_bytes
+
+        if not get_settings().dry_run:
+            date_str = report.get("run_date", "unknown")
+            s3_key = f"reports/{date_str}/daily_report.json"
+            upload_bytes(
+                s3_key,
+                json.dumps(report, default=str).encode(),
+                content_type="application/json",
+            )
+            logger.info("Daily report archived to S3: %s", s3_key)
+    except Exception as e:
+        logger.error("Failed to archive daily report to S3: %s", e)
 
 
 def get_report(date_str: str) -> dict | None:
