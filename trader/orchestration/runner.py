@@ -395,10 +395,15 @@ def run_daily(trade_date_str: str | None = None) -> DailyRunState:
     Returns:
         DailyRunState summarising the completed run.
     """
+    from trader.storage.report import build_report, persist_report
+
     settings = get_settings()
 
     if trade_date_str is None:
         trade_date_str = datetime.now(IST).date().isoformat()
+
+    started_at = datetime.now(IST).isoformat()
+    run_errors: list[str] = []
 
     logger.info("=== Daily run starting for %s ===", trade_date_str)
     trade_date = date.fromisoformat(trade_date_str)
@@ -425,6 +430,7 @@ def run_daily(trade_date_str: str | None = None) -> DailyRunState:
         nifty_df = fetch_nifty50_index(days=30)
     except Exception as e:
         logger.warning("Nifty 50 fetch failed: %s — macro context will be empty.", e)
+        run_errors.append(f"Nifty50 fetch failed: {e}")
         nifty_df = None
 
     macro_ctx = _build_macro_context(nifty_df)
@@ -434,6 +440,7 @@ def run_daily(trade_date_str: str | None = None) -> DailyRunState:
         fii_dii = fetch_fii_dii_flows(trade_date)
     except Exception as e:
         logger.warning("FII/DII fetch failed: %s — using zeros.", e)
+        run_errors.append(f"FII/DII fetch failed: {e}")
         fii_dii = {"fii_net_buy_cr": 0.0, "dii_net_buy_cr": 0.0, "date": "", "source": "unavailable"}
 
     # ── Load ledger ────────────────────────────────────────────────────────────
@@ -606,4 +613,19 @@ def run_daily(trade_date_str: str | None = None) -> DailyRunState:
         "=== Run complete %s | NAV=₹%.0f | cost=$%.4f | %d tickers (%d skipped) ===",
         trade_date_str, nav_snap.nav_inr, run_state["total_cost_usd"], len(UNIVERSE), skipped,
     )
+
+    # ── Persist comprehensive daily report ────────────────────────────────────
+    try:
+        report = build_report(
+            run_state=run_state,
+            macro_ctx=macro_ctx,
+            fii_dii=fii_dii,
+            nifty_close=nifty_close,
+            started_at=started_at,
+            run_errors=run_errors,
+        )
+        persist_report(report)
+    except Exception as e:
+        logger.error("Failed to build/persist daily report: %s", e)
+
     return run_state

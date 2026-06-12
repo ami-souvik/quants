@@ -7,6 +7,7 @@ const NAV_LINKS = [
   { href: "/decisions",  label: "Decisions" },
   { href: "/metrics",    label: "Analytics" },
   { href: "/logs",       label: "Logs" },
+  { href: "/report",     label: "Report" },
   { href: "/how-it-works", label: "System" },
 ];
 

@@ -245,6 +245,72 @@ export interface PerformanceAnalyticsResponse {
   statistical_warning: string;
 }
 
+// ─── Daily Report ─────────────────────────────────────────────────────────────
+
+export interface ReportMacro {
+  nifty_close: number;
+  nifty_1d_pct: number;
+  nifty_5d_pct: number;
+  rbi_rate: number;
+  usd_inr: number;
+  fii_net_buy_cr: number;
+  dii_net_buy_cr: number;
+  fii_dii_source: string;
+}
+
+export interface ReportSummary {
+  tickers_total: number;
+  tickers_completed: number;
+  tickers_skipped: number;
+  tickers_errored: number;
+  decision_counts: Record<string, number>;
+  total_llm_cost_usd: number;
+  schema_errors: number;
+  nav_inr: number;
+  cash_inr: number;
+  daily_return_pct: number;
+  cumulative_return_pct: number;
+  drawdown_pct: number;
+  open_positions: number;
+}
+
+export interface ReportTickerTokens {
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+}
+
+export interface ReportTicker {
+  ticker: string;
+  company_name: string;
+  sector: string;
+  status: "completed" | "skipped" | "errored";
+  skip_reason: string | null;
+  errors: string[];
+  processing_time_ms: number;
+  close_price: number;
+  pct_change_1d: number;
+  news_output: Record<string, unknown> | null;
+  technical_output: Record<string, unknown> | null;
+  fundamentals_output: Record<string, unknown> | null;
+  bull_bear_output: Record<string, unknown> | null;
+  pm_output: Record<string, unknown> | null;
+  simulated_fill: Record<string, unknown> | null;
+  tokens_used: Record<string, ReportTickerTokens>;
+  ticker_cost_usd: number;
+}
+
+export interface DailyReportResponse {
+  run_date: string;
+  started_at: string | null;
+  completed_at: string | null;
+  duration_seconds: number;
+  macro: ReportMacro;
+  summary: ReportSummary;
+  run_errors: string[];
+  tickers: ReportTicker[];
+}
+
 // ─── API functions ────────────────────────────────────────────────────────────
 
 export const api = {
@@ -273,6 +339,9 @@ export const api = {
 
   logs: (date?: string) =>
     apiFetch<LogsResponse>(`/api/logs${date ? `?date=${date}` : ""}`),
+
+  report: (date?: string) =>
+    apiFetch<DailyReportResponse>(`/api/report${date ? `?date=${date}` : ""}`),
 };
 
 // ─── Indian number formatting helpers ────────────────────────────────────────

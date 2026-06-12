@@ -244,3 +244,69 @@ class PerformanceAnalyticsResponse(BaseModel):
         "Fewer than 30 trading-day observations — reported statistics are not reliable. "
         "Revisit after 6 weeks of live paper-trading data."
     )
+
+
+# ─── Daily Report ─────────────────────────────────────────────────────────────
+
+class ReportMacro(BaseModel):
+    nifty_close: float = 0.0
+    nifty_1d_pct: float = 0.0
+    nifty_5d_pct: float = 0.0
+    rbi_rate: float = 0.0
+    usd_inr: float = 0.0
+    fii_net_buy_cr: float = 0.0
+    dii_net_buy_cr: float = 0.0
+    fii_dii_source: str = ""
+
+
+class ReportSummary(BaseModel):
+    tickers_total: int = 0
+    tickers_completed: int = 0
+    tickers_skipped: int = 0
+    tickers_errored: int = 0
+    decision_counts: dict[str, int] = Field(default_factory=dict)
+    total_llm_cost_usd: float = 0.0
+    schema_errors: int = 0
+    nav_inr: float = 0.0
+    cash_inr: float = 0.0
+    daily_return_pct: float = 0.0
+    cumulative_return_pct: float = 0.0
+    drawdown_pct: float = 0.0
+    open_positions: int = 0
+
+
+class ReportTickerTokens(BaseModel):
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
+
+
+class ReportTicker(BaseModel):
+    ticker: str
+    company_name: str = ""
+    sector: str = ""
+    status: str = "completed"           # completed | skipped | errored
+    skip_reason: str | None = None
+    errors: list[str] = Field(default_factory=list)
+    processing_time_ms: int = 0
+    close_price: float = 0.0
+    pct_change_1d: float = 0.0
+    news_output: dict[str, Any] | None = None
+    technical_output: dict[str, Any] | None = None
+    fundamentals_output: dict[str, Any] | None = None
+    bull_bear_output: dict[str, Any] | None = None
+    pm_output: dict[str, Any] | None = None
+    simulated_fill: dict[str, Any] | None = None
+    tokens_used: dict[str, ReportTickerTokens] = Field(default_factory=dict)
+    ticker_cost_usd: float = 0.0
+
+
+class DailyReportResponse(BaseModel):
+    run_date: str
+    started_at: str | None = None
+    completed_at: str | None = None
+    duration_seconds: float = 0.0
+    macro: ReportMacro = Field(default_factory=ReportMacro)
+    summary: ReportSummary = Field(default_factory=ReportSummary)
+    run_errors: list[str] = Field(default_factory=list)
+    tickers: list[ReportTicker] = Field(default_factory=list)
