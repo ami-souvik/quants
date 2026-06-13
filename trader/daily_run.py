@@ -22,12 +22,13 @@ from trader.logging_config import setup_logging
 
 IST = ZoneInfo("Asia/Kolkata")
 
-# Write to a date-stamped log file so each day's run is isolated.
-# e.g. logs/trader-2026-06-06.log
-# Falls back to the LOG_FILE env var (or logs/trader.log) only when LOG_FILE
-# is explicitly set, so local/API usage stays unaffected.
-_run_date = datetime.now(IST).date().isoformat()
-_default_log_file = f"logs/trader-{_run_date}.log"
+# Write to a datetime-stamped log file so every run gets its own isolated file.
+# e.g. logs/trader-2026-06-13T17-05-32.log
+# Using datetime (not date) ensures a second run on the same day never appends
+# to a previous run's file — each upload to S3 contains exactly one run's lines.
+# Falls back to LOG_FILE env var only when explicitly set (local/API usage).
+_run_datetime = datetime.now(IST).strftime("%Y-%m-%dT%H-%M-%S")
+_default_log_file = f"logs/trader-{_run_datetime}.log"
 _log_file = os.environ.get("LOG_FILE") or _default_log_file
 setup_logging(log_file=_log_file)
 logger = logging.getLogger(__name__)
