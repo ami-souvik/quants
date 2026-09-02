@@ -1,5 +1,4 @@
 # Ignore frontend and local files when bundling Python Serverless Functions
-dashboard/
 .next/
 node_modules/
 .venv/
