@@ -148,7 +148,7 @@ If both `ANTHROPIC_API_KEY` and `GEMINI_API_KEY` are empty, agents automatically
 ### 3. Start the stack
 
 ```bash
-docker-compose up
+docker compose up
 ```
 
 Services:

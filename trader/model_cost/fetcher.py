@@ -137,10 +137,10 @@ _FALLBACK_SNAPSHOT: dict[str, Any] = {
     },
     "gemma-4-31b-it": {
         "litellm_provider": "gemini",
-        "input_cost_per_token": 0,
-        "output_cost_per_token": 0,
-        "cache_creation_input_token_cost": 0,
-        "cache_read_input_token_cost": 0,
+        "input_cost_per_token": 0.0,
+        "output_cost_per_token": 0.0,
+        "cache_creation_input_token_cost": 0.0,
+        "cache_read_input_token_cost": 0.0,
         "max_input_tokens": 1_048_576,
         "max_output_tokens": 65_535,
     }

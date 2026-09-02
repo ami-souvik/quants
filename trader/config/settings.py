@@ -50,16 +50,17 @@ class Settings(BaseSettings):
     reddit_client_secret: str = Field(default="")
     reddit_user_agent: str = Field(default="nse-llm-trader/1.0")
 
-    # AWS
-    aws_region: str = Field(default="ap-south-1")
-    aws_access_key_id: str = Field(default="")
-    aws_secret_access_key: str = Field(default="")
-    s3_bucket_name: str = Field(default="nse-llm-trader-archive")
-    dynamo_table_name: str = Field(default="nse_trader")
-    # Leave empty to use real AWS DynamoDB.
-    # Set to http://localhost:8001 when running outside Docker against the local container,
-    # or http://dynamodb-local:8000 when running inside the compose network.
-    dynamo_endpoint_url: str = Field(default="", description="DynamoDB endpoint override for local dev")
+    # Database (Supabase / PostgreSQL)
+    database_url: str = Field(
+        default="postgresql://postgres:postgres@localhost:5432/postgres",
+        description="PostgreSQL / Supabase connection URL",
+    )
+
+    # Redis (Upstash / Local Redis)
+    redis_url: str = Field(
+        default="redis://localhost:6379",
+        description="Redis connection URL (Upstash or local)",
+    )
 
     # Agent model configuration
     # Use prefixes: "google/", "anthropic/", "ollama/" to select backend.
@@ -98,29 +99,20 @@ class Settings(BaseSettings):
     circuit_breaker_drawdown: float = Field(default=0.10)
     daily_llm_budget_usd: float = Field(default=1.00)
 
-    # FastAPI
+    # FastAPI / Dashboard Auth
     api_key: str = Field(default="changeme-local-dev")
     environment: Literal["development", "staging", "production"] = Field(
         default="development"
     )
 
-    # Redis
-    redis_url: str = Field(default="redis://localhost:6379")
-
     # Logging
     log_level: str = Field(default="INFO")
-    # Path to the rotating log file.  Relative to CWD (= /app inside the container).
-    # The docker-compose bind-mount makes ./logs/trader.log visible on the host.
-    # Set to "" to disable file logging (console only).
     log_file: str = Field(default="logs/trader.log")
 
-    # Dry-run (no DynamoDB writes, no fills)
+    # Dry-run (no DB writes, no fills)
     dry_run: bool = Field(default=False)
 
     # Schema retry behaviour
-    # When true (default): on a Pydantic validation error the agent retries once.
-    # When false: log the error immediately and skip the retry (useful when
-    # native structured output is active and retries are wasted API calls).
     agent_schema_retry_enabled: bool = Field(default=True)
 
     @field_validator("paper_trading_mode")
@@ -134,30 +126,8 @@ class Settings(BaseSettings):
         return self.initial_capital_inr * self.max_position_pct
 
 
-def _load_secret(secret_name: str, region: str) -> dict:
-    """Pull a JSON secret from AWS Secrets Manager and return it as a dict."""
-    client = boto3.client("secretsmanager", region_name=region)
-    try:
-        response = client.get_secret_value(SecretId=secret_name)
-        return json.loads(response["SecretString"])
-    except ClientError as e:
-        logger.warning("Could not load secret %s: %s", secret_name, e)
-        return {}
-
-
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """
-    Return cached Settings instance.
-    In production, merge LLM keys from Secrets Manager on top of env vars.
-    """
-    settings = Settings()
+    """Return cached Settings instance."""
+    return Settings()
 
-    if settings.environment == "production":
-        secret = _load_secret("nse-trader/llm-keys", settings.aws_region)
-        if secret.get("ANTHROPIC_API_KEY"):
-            settings.anthropic_api_key = secret["ANTHROPIC_API_KEY"]
-        if secret.get("GEMINI_API_KEY"):
-            settings.gemini_api_key = secret["GEMINI_API_KEY"]
-
-    return settings

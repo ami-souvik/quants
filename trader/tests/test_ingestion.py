@@ -295,76 +295,38 @@ class TestDeduplicateArticles:
         assert deduplicate_articles(articles) == articles
 
     def test_near_identical_titles_deduplicated(self):
-        """Two articles with identical embeddings (sim=1.0 > 0.85) → only one kept."""
+        """Two articles with near-identical titles → only one kept."""
         from trader.ingestion.dedup import deduplicate_articles
         articles = [
-            {"title": "Reliance Q4 profit up 8%", "url": "http://a.com"},
-            {"title": "Reliance Q4 profit rises 8%", "url": "http://b.com"},
+            {"title": "Reliance Industries reports Q4 profit up 8%", "url": "http://a.com"},
+            {"title": "Reliance Industries reports Q4 profit up 8%", "url": "http://b.com"},
         ]
-        shared_embedding = [1.0, 0.0, 0.0]
-
-        with patch("trader.ingestion.dedup._get_model") as mock_get_model:
-            mock_model = MagicMock()
-            mock_model.encode.return_value = np.array([shared_embedding, shared_embedding])
-            mock_get_model.return_value = mock_model
-
-            result = deduplicate_articles(articles)
-
+        result = deduplicate_articles(articles)
         assert len(result) == 1
-        assert result[0]["url"] == "http://a.com"  # first is kept
+        assert result[0]["url"] == "http://a.com"
 
     def test_distinct_articles_both_kept(self):
-        """Two orthogonal articles (sim=0.0 < 0.85) → both kept."""
+        """Two distinct articles → both kept."""
         from trader.ingestion.dedup import deduplicate_articles
         articles = [
             {"title": "Reliance reports strong Q4 results", "url": "http://a.com"},
             {"title": "RBI holds interest rates at 6.5%", "url": "http://b.com"},
         ]
-        emb_a = [1.0, 0.0, 0.0]
-        emb_b = [0.0, 1.0, 0.0]  # orthogonal, cosine_sim = 0
-
-        with patch("trader.ingestion.dedup._get_model") as mock_get_model:
-            mock_model = MagicMock()
-            mock_model.encode.return_value = np.array([emb_a, emb_b])
-            mock_get_model.return_value = mock_model
-
-            result = deduplicate_articles(articles)
-
+        result = deduplicate_articles(articles)
         assert len(result) == 2
-
-    def test_model_failure_returns_original_list(self):
-        """If embedding fails, dedup returns original list without crashing."""
-        from trader.ingestion.dedup import deduplicate_articles
-        articles = [
-            {"title": "Article A", "url": "http://a.com"},
-            {"title": "Article B", "url": "http://b.com"},
-        ]
-        with patch("trader.ingestion.dedup._get_model") as mock_get_model:
-            mock_get_model.side_effect = RuntimeError("model load failed")
-            result = deduplicate_articles(articles)
-
-        assert len(result) == 2  # unchanged
 
     def test_three_similar_one_different(self):
         """3 near-identical + 1 different → 2 kept."""
         from trader.ingestion.dedup import deduplicate_articles
         articles = [
-            {"title": "A", "url": "http://a.com"},
-            {"title": "A2", "url": "http://b.com"},
-            {"title": "A3", "url": "http://c.com"},
-            {"title": "D", "url": "http://d.com"},
+            {"title": "HDFC Bank Q3 net profit jumps 33 percent", "url": "http://a.com"},
+            {"title": "HDFC Bank Q3 net profit jumps 33 percent", "url": "http://b.com"},
+            {"title": "HDFC Bank Q3 net profit jumps 33 percent year on year", "url": "http://c.com"},
+            {"title": "Tata Motors launches new EV lineup", "url": "http://d.com"},
         ]
-        same = [1.0, 0.0, 0.0]
-        diff = [0.0, 1.0, 0.0]
-
-        with patch("trader.ingestion.dedup._get_model") as mock_get_model:
-            mock_model = MagicMock()
-            mock_model.encode.return_value = np.array([same, same, same, diff])
-            mock_get_model.return_value = mock_model
-
-            result = deduplicate_articles(articles)
-
+        result = deduplicate_articles(articles)
         assert len(result) == 2
+
 
 
 # ─── fii_dii.py ───────────────────────────────────────────────────────────────

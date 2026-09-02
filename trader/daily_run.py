@@ -100,22 +100,60 @@ def main() -> int:
     if cost > 1.00:
         logger.warning("Daily LLM cost $%.4f exceeds $1.00 budget — review model usage.", cost)
 
-    # Upload the completed log file to S3 so the dashboard can retrieve it.
-    # Uses run_started_at (not completed_at) as the timestamp — this makes the
-    # S3 key stable even if the run is retried, since started_at is set once.
-    _upload_log(_log_file, run_started_at)
+    # Persist the completed log session to PostgreSQL
+    _save_log_session(_log_file, run_started_at, trade_date)
 
     return 0
 
 
-def _upload_log(log_file: str, run_started_at: str) -> None:
-    """Upload the local log file to S3. Non-fatal — logs errors but never raises."""
+def _save_log_session(log_file: str, run_started_at: str, trade_date: str) -> None:
+    """Save the local log file to PostgreSQL daily_logs. Non-fatal — logs errors but never raises."""
     try:
-        from trader.storage.s3 import upload_log
-        upload_log(log_file, run_started_at)
+        if not os.path.exists(log_file):
+            return
+
+        with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+            raw_lines = f.readlines()
+
+        lines = []
+        error_count = 0
+        warning_count = 0
+
+        for line in raw_lines:
+            line_str = line.strip()
+            if not line_str:
+                continue
+            level = "INFO"
+            if "ERROR" in line_str or "CRITICAL" in line_str:
+                level = "ERROR"
+                error_count += 1
+            elif "WARNING" in line_str:
+                level = "WARNING"
+                warning_count += 1
+            elif "DEBUG" in line_str:
+                level = "DEBUG"
+
+            lines.append({
+                "timestamp": run_started_at,
+                "level": level,
+                "logger": "trader",
+                "message": line_str,
+                "raw": line_str,
+            })
+
+        from trader.storage import postgres
+        postgres.save_daily_log(
+            run_datetime=run_started_at,
+            date_str=trade_date,
+            lines=lines,
+            error_count=error_count,
+            warning_count=warning_count,
+        )
+        logger.info("Daily run log session persisted to PostgreSQL.")
     except Exception as exc:
-        logger.error("Log S3 upload failed: %s", exc)
+        logger.error("Log PostgreSQL persistence failed: %s", exc)
 
 
 if __name__ == "__main__":
     sys.exit(main())
+

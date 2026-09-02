@@ -1,70 +1,62 @@
 """
-News article deduplication via sentence-transformer cosine similarity.
+News article deduplication via lightweight fuzzy token ratio similarity.
 
-Uses all-MiniLM-L6-v2 (free, ~80 MB, runs locally) to embed article titles.
-Articles with cosine similarity > 0.85 to any already-retained article are dropped.
-The model is loaded lazily and cached in the module so repeated calls are cheap.
+Articles with similarity score > 85 to any already-retained article are dropped.
+Runs in microseconds without needing PyTorch or external model weights.
 """
 from __future__ import annotations
 
 import logging
 
-import numpy as np
-
 logger = logging.getLogger(__name__)
 
-_model = None
-_SIMILARITY_THRESHOLD = 0.85
+_SIMILARITY_THRESHOLD = 85.0  # 0 to 100 scale in rapidfuzz
 
 
-def _get_model():
-    global _model
-    if _model is None:
-        from sentence_transformers import SentenceTransformer
-        logger.info("Loading sentence-transformer model (first call only)…")
-        _model = SentenceTransformer("all-MiniLM-L6-v2")
-    return _model
-
-
-def _cosine_similarity_matrix(embeddings: np.ndarray) -> np.ndarray:
-    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-    norms = np.where(norms == 0, 1e-9, norms)
-    normalized = embeddings / norms
-    return normalized @ normalized.T
+def _fuzzy_similarity(str1: str, str2: str) -> float:
+    """Calculate token similarity score between two headlines."""
+    try:
+        from rapidfuzz import fuzz
+        return float(fuzz.token_set_ratio(str1, str2))
+    except ImportError:
+        # Fallback to simple Jaccard set similarity if rapidfuzz is not yet installed
+        words1 = set(str1.lower().split())
+        words2 = set(str2.lower().split())
+        if not words1 or not words2:
+            return 0.0
+        intersection = len(words1 & words2)
+        union = len(words1 | words2)
+        return (intersection / union) * 100.0
 
 
 def deduplicate_articles(articles: list[dict]) -> list[dict]:
     """
-    Remove articles whose title is cosine-similar (> 0.85) to a previously retained article.
+    Remove articles whose title is similar (> 85% score) to a previously retained article.
     Comparisons are done on `title` field only for speed.
     Returns a deduplicated list preserving original order of first occurrences.
     """
     if len(articles) <= 1:
         return articles
 
-    titles = [a.get("title", "") for a in articles]
+    kept: list[dict] = []
+    for article in articles:
+        title = article.get("title", "").strip()
+        if not title:
+            continue
 
-    try:
-        model = _get_model()
-        embeddings = model.encode(titles, batch_size=32, show_progress_bar=False)
-    except Exception as e:
-        logger.warning("Dedup embedding failed (%s); returning articles without dedup", e)
-        return articles
-
-    sim_matrix = _cosine_similarity_matrix(np.array(embeddings))
-
-    kept_indices: list[int] = []
-    for i in range(len(articles)):
         is_dup = False
-        for j in kept_indices:
-            if sim_matrix[i, j] > _SIMILARITY_THRESHOLD:
+        for kept_article in kept:
+            kept_title = kept_article.get("title", "").strip()
+            if _fuzzy_similarity(title, kept_title) >= _SIMILARITY_THRESHOLD:
                 is_dup = True
                 break
-        if not is_dup:
-            kept_indices.append(i)
 
-    removed = len(articles) - len(kept_indices)
+        if not is_dup:
+            kept.append(article)
+
+    removed = len(articles) - len(kept)
     if removed:
         logger.debug("Dedup removed %d/%d duplicate articles", removed, len(articles))
 
-    return [articles[i] for i in kept_indices]
+    return kept
+

@@ -107,16 +107,6 @@ def fetch_bhavcopy(trade_date: date) -> pd.DataFrame:
     Columns: symbol, open, high, low, close, volume (plus NSE originals).
     """
     from trader.config.tickers import SYMBOLS
-    from trader.storage.s3 import upload_bytes, key_exists
-
-    s3_key = f"bhavcopy/{trade_date.isoformat()}.csv"
-
-    # Check S3 cache first — avoid re-downloading the same day's file
-    try:
-        if key_exists(s3_key):
-            logger.info("Bhavcopy for %s already in S3; skipping re-download", trade_date)
-    except Exception:
-        pass
 
     date_str = trade_date.strftime("%d%m%Y")
     url = (
@@ -133,11 +123,6 @@ def fetch_bhavcopy(trade_date: date) -> pd.DataFrame:
     except Exception as e:
         logger.warning("Bhavcopy download failed for %s (%s); returning empty DataFrame", trade_date, e)
         return pd.DataFrame(columns=["symbol", "open", "high", "low", "close", "volume"])
-
-    try:
-        upload_bytes(s3_key, raw_bytes, content_type="text/csv")
-    except Exception as e:
-        logger.warning("S3 archive failed for bhavcopy %s: %s", trade_date, e)
 
     df = pd.read_csv(io.BytesIO(raw_bytes))
     df.columns = [c.strip() for c in df.columns]

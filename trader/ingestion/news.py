@@ -390,32 +390,6 @@ def fetch_news_for_ticker(
         for a in result
     ]
     C._set(cache_key, serialisable)
-
-    # Archive raw articles to S3 once per (ticker, agent, date) — best-effort.
-    # Key: news/{date}/{ticker}/{agent_name}.json
-    # Only written when there are articles and not in dry-run mode.
-    if serialisable:
-        try:
-            import json
-            from datetime import date as _date
-            from trader.config.settings import get_settings as _gs
-            from trader.storage.s3 import upload_bytes as _upload
-
-            if not _gs().dry_run:
-                date_str = _date.today().isoformat()
-                s3_key = f"news/{date_str}/{ticker}/{agent_name}.json"
-                payload = {
-                    "ticker": ticker,
-                    "company_name": company_name,
-                    "agent_name": agent_name,
-                    "date": date_str,
-                    "article_count": len(serialisable),
-                    "articles": serialisable,
-                }
-                _upload(s3_key, json.dumps(payload, default=str).encode(), content_type="application/json")
-        except Exception as _exc:
-            logger.debug("News S3 archive failed (non-fatal): %s", _exc)
-
     return serialisable
 
 

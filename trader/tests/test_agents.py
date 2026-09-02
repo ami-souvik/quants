@@ -232,6 +232,7 @@ class TestPMSchemaValidation:
             agent = BaseAgent.__new__(BaseAgent)
             agent.name = "portfolio_manager"
             agent.model = "claude-haiku-4-5"
+            agent.settings = MagicMock(agent_schema_retry_enabled=True)
 
         def parse_fn(text: str) -> PMDecision:
             return BaseAgent._parse_output(agent, text, PMDecision)
@@ -251,6 +252,7 @@ class TestPMSchemaValidation:
             agent = BaseAgent.__new__(BaseAgent)
             agent.name = "test"
             agent.model = "claude-haiku-4-5"
+            agent.settings = MagicMock(agent_schema_retry_enabled=True)
 
         def parse_fn(text: str) -> PMDecision:
             return BaseAgent._parse_output(agent, text, PMDecision)

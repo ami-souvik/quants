@@ -1,0 +1,36 @@
+name: Daily Trading Pipeline
+on:
+  schedule:
+    # 15:35 IST (10:05 UTC) Mon-Fri
+    - cron: '5 10 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  trade:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -e .
+
+      - name: Execute Daily Run
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REDIS_URL: ${{ secrets.REDIS_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          API_KEY: ${{ secrets.API_KEY }}
+          PAPER_TRADING_MODE: "true"
+          ENVIRONMENT: "production"
+        run: |
+          python -m trader.daily_run

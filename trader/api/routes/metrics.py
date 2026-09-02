@@ -36,7 +36,7 @@ from trader.metrics.performance import (
     calculate_avg_win_loss_ratio,
     _to_float,
 )
-from trader.storage import dynamo
+from trader.storage import postgres
 
 logger = logging.getLogger(__name__)
 
@@ -46,68 +46,37 @@ _MIN_OBS_FOR_RELIABLE_STATS = 30
 
 
 def _fetch_nav_history(from_date: str | None = None, to_date: str | None = None) -> list[dict]:
-    """
-    Fetch all NAV items from DynamoDB within the given date range.
-    If dates are not provided, returns all available history.
-    """
-    # DynamoDB single-table: NAV items have PK=DATE#{yyyy-mm-dd}, SK=PORTFOLIO.
-    # We scan a date range by querying each known date — since we don't have a GSI
-    # and we're in Phase 1 (at most ~30 days of data), we iterate known dates.
-    # For production with >60 days, a GSI on SK='PORTFOLIO' would be better.
-    from datetime import date as _date, timedelta
-
-    start = _date.fromisoformat(from_date) if from_date else _date(2026, 1, 1)
-    end   = _date.fromisoformat(to_date)   if to_date   else _date.today()
-
-    nav_items: list[dict] = []
-    current = start
-    while current <= end:
-        ds = current.isoformat()
-        try:
-            item = dynamo.get_nav(ds)
-            if item:
-                nav_items.append(item)
-        except Exception:
-            pass
-        current += timedelta(days=1)
-
-    return sorted(nav_items, key=lambda x: x.get("PK", ""))
+    """Fetch all NAV items from PostgreSQL within the given date range."""
+    try:
+        return postgres.get_nav_history(from_date, to_date)
+    except Exception as e:
+        logger.warning("Failed to fetch NAV history: %s", e)
+        return []
 
 
 def _fetch_all_trades() -> list[dict]:
-    """Return all trade records across all dates (expensive — only for analytics)."""
-    # Query all dates seen in nav history and collect their trades
-    nav_items = _fetch_nav_history()
-    trades: list[dict] = []
-    for nav in nav_items:
-        ds = nav.get("PK", "").replace("DATE#", "")
-        try:
-            day_trades = dynamo.get_trades_for_date(ds)
-            trades.extend(day_trades)
-        except Exception:
-            pass
-    return trades
+    """Return all trade records across all dates from PostgreSQL."""
+    try:
+        return postgres.get_all_trades()
+    except Exception as e:
+        logger.warning("Failed to fetch all trades: %s", e)
+        return []
 
 
 def _compute_trade_pnls(trades: list[dict]) -> list[float]:
     """
     Convert a list of TRADE items into realised P&L values (INR).
-    Only SELL/EXIT trades have realised P&L — matched against BUY fills
-    using FIFO logic is complex; for the dashboard we use a simple
-    trade_value * (side multiplier) approach as an approximation.
     """
-    # Simplified: sum fill values by ticker, netting BUYs and EXITs
-    # {ticker: [fill_value]}
     pnls: list[float] = []
     from collections import defaultdict
     buy_values: dict[str, list[float]] = defaultdict(list)
 
-    for trade in sorted(trades, key=lambda t: t.get("PK", "")):
+    for trade in trades:
         sym = trade.get("ticker", "")
         side = trade.get("side", "")
-        fill_price = _to_float(trade.get("fill_price", 0))
+        fill_price = _to_float(trade.get("price") or trade.get("fill_price", 0))
         qty = int(_to_float(trade.get("qty", 0)))
-        cost_inr = _to_float(trade.get("simulated_cost_inr", 0))
+        cost_inr = _to_float(trade.get("cost_inr") or trade.get("simulated_cost_inr", 0))
 
         if side == "BUY":
             buy_values[sym].append(fill_price * qty + cost_inr)
@@ -124,9 +93,6 @@ def _compute_trade_pnls(trades: list[dict]) -> list[float]:
 def get_metrics_summary() -> MetricsSummaryResponse:
     """
     Return key performance statistics for the entire trading history.
-
-    Requires at least 2 NAV records. Returns zeros for metrics when
-    insufficient data is available.
     """
     settings = get_settings()
     nav_history = _fetch_nav_history()
@@ -202,13 +168,12 @@ def get_daily_nav(
 ) -> DailyNavResponse:
     """
     Return the daily NAV time series for the given date range.
-    Used by the NAV chart component in the dashboard.
     """
     nav_history = _fetch_nav_history(from_date, to_date)
 
     points = [
         DailyNavPoint(
-            date=nav.get("PK", "").replace("DATE#", ""),
+            date=str(nav.get("date") or nav.get("PK", "").replace("DATE#", "")),
             nav=_to_float(nav.get("nav_inr", 0)),
             daily_return_pct=_to_float(nav.get("daily_return_pct", 0)),
             nifty_return_pct=_to_float(nav.get("nifty50_daily_return_pct", 0)),
@@ -231,9 +196,6 @@ def get_performance_analytics() -> PerformanceAnalyticsResponse:
     """
     Return detailed analytics: per-agent hit rates, LLM cost breakdown,
     and benchmark comparison.
-
-    This is slower than /summary — it queries decisions for all dates.
-    Called only from the dedicated Metrics page, not the main dashboard.
     """
     nav_history = _fetch_nav_history()
 
@@ -249,9 +211,9 @@ def get_performance_analytics() -> PerformanceAnalyticsResponse:
     # Fetch all decisions for hit-rate computation
     all_decisions: list[dict] = []
     for nav in nav_history:
-        ds = nav.get("PK", "").replace("DATE#", "")
+        ds = str(nav.get("date") or nav.get("PK", "").replace("DATE#", ""))
         try:
-            all_decisions.extend(dynamo.get_decisions_for_date(ds))
+            all_decisions.extend(postgres.get_decisions_for_date(ds))
         except Exception:
             pass
 
@@ -269,9 +231,11 @@ def get_performance_analytics() -> PerformanceAnalyticsResponse:
     # Build LLM cost breakdown from decision items
     cost_map: dict[tuple[str, str], dict] = {}
     for dec in all_decisions:
-        sk = dec.get("SK", "")
-        parts = sk.split("#")
-        agent_name = parts[3] if len(parts) >= 4 else "Unknown"
+        agent_name = dec.get("agent")
+        if not agent_name and "SK" in dec:
+            parts = dec["SK"].split("#")
+            agent_name = parts[3] if len(parts) >= 4 else "Unknown"
+        agent_name = agent_name or "Unknown"
         model = dec.get("model", "unknown")
         key = (agent_name, model)
         if key not in cost_map:
@@ -322,3 +286,4 @@ def get_performance_analytics() -> PerformanceAnalyticsResponse:
             "Statistics are based on sufficient observations."
         ),
     )
+

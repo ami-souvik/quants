@@ -6,6 +6,7 @@ All tests run without DynamoDB/S3 — purely in-memory ledger state.
 from __future__ import annotations
 
 import pytest
+from unittest.mock import MagicMock, patch
 
 from trader.ledger.circuit_breaker import (
     CircuitBreakerStatus,
@@ -298,29 +299,33 @@ class TestCircuitBreakers:
         }
 
     def test_drawdown_triggered_at_10pct(self):
-        status = check_circuit_breakers(
-            ticker="RELIANCE",
-            ticker_sector="Energy",
-            is_restricted=False,
-            drawdown_pct=10.5,       # ≥10%
-            nav_inr=1_000_000.0,
-            positions={},
-            daily_llm_cost_usd=0.0,
-        )
-        assert status.drawdown_triggered is True
-        assert status.blocks_new_buy is True
+        with patch("trader.ledger.circuit_breaker.get_settings") as mock_settings:
+            mock_settings.return_value = MagicMock(circuit_breaker_drawdown=0.10, max_position_pct=0.15, daily_llm_budget_usd=1.0)
+            status = check_circuit_breakers(
+                ticker="RELIANCE",
+                ticker_sector="Energy",
+                is_restricted=False,
+                drawdown_pct=10.5,       # ≥10%
+                nav_inr=1_000_000.0,
+                positions={},
+                daily_llm_cost_usd=0.0,
+            )
+            assert status.drawdown_triggered is True
+            assert status.blocks_new_buy is True
 
     def test_drawdown_not_triggered_below_10pct(self):
-        status = check_circuit_breakers(
-            ticker="RELIANCE",
-            ticker_sector="Energy",
-            is_restricted=False,
-            drawdown_pct=9.9,
-            nav_inr=1_000_000.0,
-            positions={},
-            daily_llm_cost_usd=0.0,
-        )
-        assert status.drawdown_triggered is False
+        with patch("trader.ledger.circuit_breaker.get_settings") as mock_settings:
+            mock_settings.return_value = MagicMock(circuit_breaker_drawdown=0.10, max_position_pct=0.15, daily_llm_budget_usd=1.0)
+            status = check_circuit_breakers(
+                ticker="RELIANCE",
+                ticker_sector="Energy",
+                is_restricted=False,
+                drawdown_pct=9.9,
+                nav_inr=1_000_000.0,
+                positions={},
+                daily_llm_cost_usd=0.0,
+            )
+            assert status.drawdown_triggered is False
 
     def test_restricted_triggered(self):
         status = check_circuit_breakers(

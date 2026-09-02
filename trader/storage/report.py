@@ -19,7 +19,7 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from trader.storage import dynamo
+from trader.storage import postgres
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -172,33 +172,17 @@ def build_report(
 
 
 def persist_report(report: dict) -> None:
-    """Write the report to DynamoDB and archive a full copy to S3."""
-    # DynamoDB — primary store (used by the API)
+    """Write the daily report to Supabase / PostgreSQL."""
     try:
-        dynamo.put_item(dynamo._table(), report)
-        logger.info("Daily report persisted to DynamoDB for %s", report.get("run_date"))
+        from trader.storage import postgres
+        postgres.save_daily_report(report)
+        logger.info("Daily report persisted to PostgreSQL for %s", report.get("run_date"))
     except Exception as e:
-        logger.error("Failed to persist daily report to DynamoDB: %s", e)
-
-    # S3 — full JSON archive (DynamoDB strips Decimal precision; S3 keeps the raw dict)
-    try:
-        import json
-        from trader.config.settings import get_settings
-        from trader.storage.s3 import upload_bytes
-
-        if not get_settings().dry_run:
-            date_str = report.get("run_date", "unknown")
-            s3_key = f"reports/{date_str}/daily_report.json"
-            upload_bytes(
-                s3_key,
-                json.dumps(report, default=str).encode(),
-                content_type="application/json",
-            )
-            logger.info("Daily report archived to S3: %s", s3_key)
-    except Exception as e:
-        logger.error("Failed to archive daily report to S3: %s", e)
+        logger.error("Failed to persist daily report to PostgreSQL: %s", e)
 
 
 def get_report(date_str: str) -> dict | None:
     """Fetch the daily report for a given date string (yyyy-mm-dd)."""
-    return dynamo.get_item(dynamo._table(), pk=f"DATE#{date_str}", sk="REPORT")
+    from trader.storage import postgres
+    return postgres.get_daily_report(date_str)
+

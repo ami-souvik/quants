@@ -32,7 +32,7 @@ from trader.ingestion.news import fetch_news_for_ticker
 from trader.ledger.paper_trade import PaperTradingLedger
 from trader.orchestration.graph import build_ticker_graph
 from trader.orchestration.state import DailyRunState, empty_ticker_state
-from trader.storage import dynamo
+from trader.storage import postgres
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -337,20 +337,15 @@ def _load_ledger(trade_date_str: str) -> PaperTradingLedger:
     yesterday = (today - timedelta(days=1)).isoformat()
 
     # Try to restore from yesterday's NAV snapshot
-    nav_item = dynamo.get_nav(yesterday)
+    nav_item = postgres.get_nav(yesterday)
     if nav_item is None:
         logger.info("No prior NAV found — initialising ledger from scratch.")
         return PaperTradingLedger.from_scratch(trade_date_str)
 
-    # Load today's open positions (still under TICKER#X keys)
-    position_items: list[dict] = []
-    for t in UNIVERSE:
-        pos = dynamo.get_position(t.symbol, yesterday)
-        if pos and int(pos.get("qty", 0)) > 0:
-            pos["PK"] = f"TICKER#{t.symbol}"
-            position_items.append(pos)
+    # Load today's open positions from PostgreSQL
+    position_items: list[dict] = postgres.get_open_positions()
 
-    return PaperTradingLedger.from_dynamo_snapshot(
+    return PaperTradingLedger.from_snapshot(
         nav_item=nav_item,
         position_items=position_items,
         trade_date=trade_date_str,
@@ -358,31 +353,29 @@ def _load_ledger(trade_date_str: str) -> PaperTradingLedger:
 
 
 def _persist_open_positions(ledger: PaperTradingLedger, date_str: str) -> None:
-    """Write open position items to DynamoDB at end of run."""
-    import time
-    ttl = int(time.time()) + 30 * 24 * 3600
-
+    """Write open position items to PostgreSQL at end of run."""
     for pos_dict in ledger.open_positions_as_dicts():
         ticker = pos_dict["ticker"]
         item = {
-            "PK": f"TICKER#{ticker}",
-            "SK": f"DATE#{date_str}",
+            "ticker": ticker,
             "qty": pos_dict["qty"],
             "avg_price": pos_dict["avg_price"],
             "entry_date": pos_dict["entry_date"],
             "days_held": pos_dict["days_held"],
-            "product_type": "CNC",
             "horizon_days": pos_dict["horizon_days"],
             "stop_loss_price": pos_dict["stop_loss_price"],
             "target_price": pos_dict["target_price"],
             "kill_conditions": pos_dict["kill_conditions"],
-            "decision_date": pos_dict["entry_date"],
-            "ttl": ttl,
+            "sector": pos_dict.get("sector", ""),
+            "current_price": pos_dict.get("current_price", pos_dict["avg_price"]),
+            "unrealized_pnl_inr": pos_dict.get("unrealized_pnl_inr", 0.0),
+            "unrealized_pnl_pct": pos_dict.get("unrealized_pnl_pct", 0.0),
         }
         try:
-            dynamo.put_position(item)
+            postgres.put_position(item)
         except Exception as e:
             logger.error("Failed to persist position for %s: %s", ticker, e)
+
 
 
 def run_daily(trade_date_str: str | None = None) -> DailyRunState:
@@ -413,7 +406,7 @@ def run_daily(trade_date_str: str | None = None) -> DailyRunState:
     _check_ollama_if_needed(settings)
 
     # ── Idempotency check ─────────────────────────────────────────────────────
-    if dynamo.daily_run_already_completed(trade_date_str):
+    if postgres.daily_run_already_completed(trade_date_str):
         logger.info("Daily run for %s already completed — exiting.", trade_date_str)
         return DailyRunState(
             run_date=trade_date_str,
@@ -570,7 +563,7 @@ def run_daily(trade_date_str: str | None = None) -> DailyRunState:
     try:
         from datetime import timedelta
         prev_date = (date.fromisoformat(trade_date_str) - timedelta(days=1)).isoformat()
-        prev_nav_item = dynamo.get_nav(prev_date)
+        prev_nav_item = postgres.get_nav(prev_date)
         if prev_nav_item:
             prev_nav = float(prev_nav_item.get("nav_inr", 0))
     except Exception:
@@ -587,10 +580,8 @@ def run_daily(trade_date_str: str | None = None) -> DailyRunState:
     decisions_made = len(UNIVERSE) - skipped
     schema_errors = sum(len(s.get("errors", [])) for s in run_state["ticker_states"].values())
 
-    import time as _time
     nav_item = {
-        "PK": f"DATE#{trade_date_str}",
-        "SK": "PORTFOLIO",
+        "date": trade_date_str,
         **nav_snap.as_dict(),
         "nifty50_close": nifty_close,
         "nifty50_daily_return_pct": nifty_1d_pct,
@@ -598,10 +589,9 @@ def run_daily(trade_date_str: str | None = None) -> DailyRunState:
         "decisions_made": decisions_made,
         "decisions_skipped": skipped,
         "schema_error_count": schema_errors,
-        "ttl": int(_time.time()) + 30 * 24 * 3600,
     }
     try:
-        dynamo.put_nav(nav_item)
+        postgres.put_nav(nav_item)
     except Exception as e:
         logger.error("Failed to persist NAV for %s: %s", trade_date_str, e)
 

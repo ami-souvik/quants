@@ -357,14 +357,13 @@ def _build_ledger_execute_node(ledger: "PaperTradingLedger"):
     return ledger_execute_node
 
 
-def _build_persist_dynamo_node(date_str: str):
-    def persist_dynamo_node(state: dict) -> dict:
+def _build_persist_postgres_node(date_str: str):
+    def persist_postgres_node(state: dict) -> dict:
         from trader.config.settings import get_settings
-        from trader.storage import dynamo
+        from trader.storage import postgres
 
         settings = get_settings()
         ticker = state["ticker"]
-        ttl = _ttl()
 
         skip_reason = state.get("skip_reason")
         pm = state.get("pm_output")
@@ -380,7 +379,6 @@ def _build_persist_dynamo_node(date_str: str):
 
         for agent_name, output in agent_outputs.items():
             if output is None and skip_reason:
-                # For skips, write a minimal placeholder for PortfolioManager only
                 if agent_name != "PortfolioManager":
                     continue
                 output = {
@@ -395,9 +393,9 @@ def _build_persist_dynamo_node(date_str: str):
 
             usage = state.get("tokens_used", {}).get(agent_name.lower().replace(" ", "_"), {})
             item = {
-                "PK": f"DATE#{date_str}",
-                "SK": f"TICKER#{ticker}#AGENT#{agent_name}",
+                "date": date_str,
                 "ticker": ticker,
+                "agent": agent_name,
                 "decision": output.get("decision", ""),
                 "confidence": output.get("confidence", 0.0),
                 "reasoning": output.get("reasoning") or output.get("primary_thesis", ""),
@@ -409,99 +407,37 @@ def _build_persist_dynamo_node(date_str: str):
                 "schema_valid": len(state.get("errors", [])) == 0,
                 "retry_count": 0,
                 "skip_reason": skip_reason or "",
-                "ttl": ttl,
             }
             try:
-                dynamo.put_decision(item)
+                postgres.put_decision(item)
             except Exception as e:
-                logger.error("[%s] DynamoDB put_decision failed for %s: %s", ticker, agent_name, e)
+                logger.error("[%s] PostgreSQL put_decision failed for %s: %s", ticker, agent_name, e)
 
         # Write TRADE item if there was a fill
         fill = state.get("simulated_fill")
         if fill:
             import uuid
             trade_item = {
-                "PK": f"DATE#{date_str}",
-                "SK": f"TRADE#{fill.get('trade_id', str(uuid.uuid4()))}",
+                "trade_id": fill.get("trade_id", str(uuid.uuid4())),
+                "date": date_str,
                 "ticker": ticker,
                 "side": fill.get("side", ""),
                 "qty": fill.get("qty", 0),
-                "fill_price": fill.get("fill_price", 0.0),
+                "price": fill.get("fill_price", 0.0),
                 "trade_value_inr": fill.get("trade_value_inr", 0.0),
-                "simulated_cost_inr": fill.get("total_cost_inr", 0.0),
-                "simulated_cost_bps": fill.get("cost_bps", 0.0),
+                "cost_inr": fill.get("total_cost_inr", 0.0),
+                "cost_bps": fill.get("cost_bps", 0.0),
                 "slippage_bps": 3.0,
-                "product_type": "CNC",
-                "ttl": ttl,
+                "charges_breakdown": fill.get("charges_breakdown", {}),
             }
             try:
-                dynamo.put_trade(trade_item)
+                postgres.put_trade(trade_item)
             except Exception as e:
-                logger.error("[%s] DynamoDB put_trade failed: %s", ticker, e)
+                logger.error("[%s] PostgreSQL put_trade failed: %s", ticker, e)
 
         return {}
 
-    return persist_dynamo_node
-
-
-def archive_s3_node(state: dict) -> dict:
-    """
-    Archive all agent outputs to S3 (best-effort; pipeline never fails here).
-
-    Writes per ticker per day:
-      decisions/{date}/{ticker}/agents.json    — all 5 agent outputs + tokens + errors
-      decisions/{date}/{ticker}/pm_output.json — PM only (backwards compat)
-    """
-    from trader.config.settings import get_settings
-    settings = get_settings()
-    if settings.dry_run:
-        return {}
-
-    import json
-    from trader.storage.s3 import upload_bytes
-
-    ticker = state["ticker"]
-    date_str = datetime.now(IST).date().isoformat()
-
-    # ── All 5 agent outputs in one document ───────────────────────────────────
-    agents_payload = {
-        "ticker": ticker,
-        "date": date_str,
-        "skip_reason": state.get("skip_reason"),
-        "errors": state.get("errors", []),
-        "processing_time_ms": state.get("processing_time_ms", 0),
-        "tokens_used": state.get("tokens_used", {}),
-        "agents": {
-            "news_sentiment":    state.get("news_output"),
-            "technical":         state.get("technical_output"),
-            "fundamentals":      state.get("fundamentals_output"),
-            "bull_bear":         state.get("bull_bear_output"),
-            "portfolio_manager": state.get("pm_output"),
-        },
-        "simulated_fill": state.get("simulated_fill"),
-    }
-    try:
-        upload_bytes(
-            f"decisions/{date_str}/{ticker}/agents.json",
-            json.dumps(agents_payload, default=str).encode(),
-            content_type="application/json",
-        )
-    except Exception as e:
-        logger.warning("[%s] S3 agents.json archive failed (non-fatal): %s", ticker, e)
-
-    # ── PM output standalone (backwards compat) ───────────────────────────────
-    pm = state.get("pm_output")
-    if pm:
-        try:
-            upload_bytes(
-                f"decisions/{date_str}/{ticker}/pm_output.json",
-                json.dumps(pm, default=str).encode(),
-                content_type="application/json",
-            )
-        except Exception as e:
-            logger.warning("[%s] S3 pm_output.json archive failed (non-fatal): %s", ticker, e)
-
-    return {}
+    return persist_postgres_node
 
 
 # ── Routing helpers ────────────────────────────────────────────────────────────
@@ -534,7 +470,7 @@ def build_ticker_graph(
     """
     pm_node = _build_pm_node(ledger, daily_cost_ref)
     ledger_node = _build_ledger_execute_node(ledger)
-    persist_node = _build_persist_dynamo_node(date_str)
+    persist_node = _build_persist_postgres_node(date_str)
 
     graph = StateGraph(TickerState)
 
@@ -547,20 +483,19 @@ def build_ticker_graph(
     graph.add_node("portfolio_manager", pm_node)
     graph.add_node("cost_guard", cost_guard_node)
     graph.add_node("ledger_execute", ledger_node)
-    graph.add_node("persist_dynamo", persist_node)
-    graph.add_node("archive_s3", archive_s3_node)
+    graph.add_node("persist_postgres", persist_node)
 
     graph.add_edge(START, "check_restrictions")
 
     graph.add_conditional_edges(
         "check_restrictions",
         _route_after_restriction,
-        {"skip": "persist_dynamo", "continue": "check_quiet"},
+        {"skip": "persist_postgres", "continue": "check_quiet"},
     )
     graph.add_conditional_edges(
         "check_quiet",
         _route_after_quiet,
-        {"skip": "persist_dynamo", "continue": "news_sentiment"},
+        {"skip": "persist_postgres", "continue": "news_sentiment"},
     )
 
     graph.add_edge("news_sentiment", "technical")
@@ -569,8 +504,7 @@ def build_ticker_graph(
     graph.add_edge("bull_bear", "portfolio_manager")
     graph.add_edge("portfolio_manager", "cost_guard")
     graph.add_edge("cost_guard", "ledger_execute")
-    graph.add_edge("ledger_execute", "persist_dynamo")
-    graph.add_edge("persist_dynamo", "archive_s3")
-    graph.add_edge("archive_s3", END)
+    graph.add_edge("ledger_execute", "persist_postgres")
+    graph.add_edge("persist_postgres", END)
 
     return graph.compile()

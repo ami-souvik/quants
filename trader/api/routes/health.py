@@ -14,7 +14,7 @@ from fastapi import APIRouter
 
 from trader.api.schemas import HealthResponse
 from trader.config.settings import get_settings
-from trader.storage import dynamo
+from trader.storage import postgres
 
 logger = logging.getLogger(__name__)
 
@@ -26,9 +26,8 @@ def get_health() -> HealthResponse:
     """
     Returns system health status.
 
-    Checks DynamoDB for today's NAV item to determine whether the daily run
-    has completed. Does NOT raise exceptions on DynamoDB failures — returns
-    degraded status instead so the dashboard still renders.
+    Checks PostgreSQL for today's NAV item to determine whether the daily run
+    has completed. Does NOT raise exceptions on database failures.
     """
     settings = get_settings()
     today = date.today().isoformat()
@@ -37,20 +36,22 @@ def get_health() -> HealthResponse:
     circuit_breakers: list[str] = []
 
     try:
-        nav_item = dynamo.get_nav(today)
+        nav_item = postgres.get_nav(today)
+        if not nav_item:
+            history = postgres.get_nav_history()
+            if history:
+                nav_item = history[-1]
         if nav_item:
-            # The runner writes completed_at into the NAV item
-            last_run = nav_item.get("completed_at") or nav_item.get("run_date") or today
+            last_run = str(nav_item.get("created_at") or nav_item.get("date") or today)
             daily_llm_cost = float(nav_item.get("total_llm_cost_usd_today", 0.0))
 
-            # Derive active circuit breakers from today's NAV
             drawdown = float(nav_item.get("drawdown_pct", 0.0))
             if drawdown <= -settings.circuit_breaker_drawdown * 100:
                 circuit_breakers.append("DRAWDOWN")
             if daily_llm_cost > settings.daily_llm_budget_usd:
                 circuit_breakers.append("LLM_COST")
     except Exception as exc:
-        logger.warning("Health check: DynamoDB unavailable — %s", exc)
+        logger.warning("Health check: PostgreSQL unavailable — %s", exc)
 
     return HealthResponse(
         status="OK",

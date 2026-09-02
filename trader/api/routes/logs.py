@@ -87,7 +87,7 @@ def _summarise(lines: list[LogLine]) -> dict:
     }
 
 
-# ── S3-backed endpoints ───────────────────────────────────────────────────────
+# ── PostgreSQL-backed session endpoints ──────────────────────────────────────
 
 @router.get("/logs/sessions", response_model=LogSessionsResponse)
 def list_log_sessions(
@@ -98,34 +98,30 @@ def list_log_sessions(
     ),
 ) -> LogSessionsResponse:
     """
-    List all log sessions for a date from S3, newest first.
-    Each session includes line count, error count, and warning count.
+    List all log sessions for a date from PostgreSQL, newest first.
     """
-    from trader.storage.s3 import download_log, list_log_sessions
+    from trader.storage import postgres
 
     target_date = date_str or date.today().isoformat()
-    raw_sessions = list_log_sessions(target_date)
+    try:
+        raw_sessions = postgres.list_log_sessions(target_date)
+    except Exception as e:
+        logger.warning("Failed to list log sessions from PostgreSQL: %s", e)
+        raw_sessions = []
 
-    sessions: list[LogSession] = []
-    for s in raw_sessions:
-        # Download each session to compute summary stats.
-        # For large deployments a pre-computed stats sidecar would be better,
-        # but for 1–3 daily runs this is fast enough.
-        try:
-            text = download_log(s["key"])
-            lines = _parse_text(text)
-            stats = _summarise(lines)
-        except Exception as exc:
-            logger.warning("Could not read log session %s for summary: %s", s["key"], exc)
-            stats = {"line_count": 0, "error_count": 0, "warning_count": 0, "has_error": False}
-
-        sessions.append(LogSession(
+    sessions: list[LogSession] = [
+        LogSession(
             key=s["key"],
             run_datetime=s["run_datetime"],
-            size_bytes=s["size_bytes"],
-            last_modified=s["last_modified"],
-            **stats,
-        ))
+            size_bytes=0,
+            last_modified=s.get("last_modified", ""),
+            line_count=s.get("line_count", 0),
+            error_count=s.get("error_count", 0),
+            warning_count=s.get("warning_count", 0),
+            has_error=s.get("has_error", False),
+        )
+        for s in raw_sessions
+    ]
 
     return LogSessionsResponse(
         date=target_date,
@@ -136,26 +132,43 @@ def list_log_sessions(
 
 @router.get("/logs/session", response_model=LogSessionDetailResponse)
 def get_log_session(
-    key: str = Query(..., description="Full S3 key of the log session"),
+    key: str = Query(..., description="Full key of the log session"),
 ) -> LogSessionDetailResponse:
     """
-    Download and return the full parsed log for one session.
+    Return the parsed log lines for one session from PostgreSQL or local file.
     """
-    from trader.storage.s3 import download_log
+    from trader.storage import postgres
 
+    # Extract date and datetime from key
+    date_part = ""
+    run_dt = ""
     try:
-        text = download_log(key)
-    except Exception as exc:
-        raise HTTPException(status_code=404, detail=f"Log session not found: {exc}")
+        parts = key.split("/")
+        if len(parts) >= 2:
+            date_part = parts[1]
+        name = parts[-1].removeprefix("run-").removesuffix(".log")
+        run_dt = name
+    except Exception:
+        date_part = date.today().isoformat()
+        run_dt = date_part
 
-    lines = _parse_text(text)
+    lines_data: list[dict] = []
+    try:
+        lines_data = postgres.get_daily_logs(date_part)
+    except Exception as e:
+        logger.warning("Failed to fetch logs from DB: %s", e)
+
+    lines: list[LogLine] = [
+        LogLine(
+            timestamp=l.get("timestamp", ""),
+            level=l.get("level", "INFO"),
+            logger=l.get("logger", "trader"),
+            message=l.get("message", ""),
+            raw=l.get("raw", ""),
+        )
+        for l in lines_data
+    ]
     stats = _summarise(lines)
-
-    # Infer run_datetime from the key name
-    name = key.split("/")[-1]
-    raw_dt = name.removeprefix("run-").removesuffix(".log")
-    date_part, _, time_part = raw_dt.partition("T")
-    run_dt = f"{date_part}T{time_part.replace('-', ':')}" if time_part else date_part
 
     return LogSessionDetailResponse(
         key=key,
@@ -164,6 +177,7 @@ def get_log_session(
         total=len(lines),
         **stats,
     )
+
 
 
 # ── Legacy endpoint (local file fallback) ─────────────────────────────────────

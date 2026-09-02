@@ -160,28 +160,30 @@ class PaperTradingLedger:
         position_items: list[dict],
         trade_date: str,
     ) -> "PaperTradingLedger":
-        """Reconstruct the ledger from DynamoDB items persisted at end of previous run."""
+        """Reconstruct the ledger from items persisted at end of previous run."""
         settings = get_settings()
 
         positions: dict[str, Position] = {}
         for item in position_items:
-            ticker = item["PK"].removeprefix("TICKER#")
+            ticker = item.get("ticker") or item.get("PK", "").removeprefix("TICKER#")
+            if not ticker:
+                continue
             try:
                 sector = get_ticker(ticker).sector
             except ValueError:
-                sector = "Unknown"
+                sector = item.get("sector", "Unknown")
             positions[ticker] = Position(
                 ticker=ticker,
                 sector=sector,
                 qty=int(item.get("qty", 0)),
                 avg_price=float(item.get("avg_price", 0)),
-                entry_date=item.get("entry_date", trade_date),
+                entry_date=str(item.get("entry_date", trade_date)),
                 days_held=int(item.get("days_held", 0)),
                 stop_loss_price=float(item.get("stop_loss_price", 0)),
                 target_price=float(item.get("target_price", 0)),
                 kill_conditions=list(item.get("kill_conditions", [])),
                 horizon_days=int(item.get("horizon_days", 3)),
-                current_price=float(item.get("avg_price", 0)),
+                current_price=float(item.get("current_price", item.get("avg_price", 0))),
             )
 
         cash = float(nav_item.get("cash_inr", settings.initial_capital_inr))
@@ -194,6 +196,10 @@ class PaperTradingLedger:
             initial_capital_inr=settings.initial_capital_inr,
             trade_date=trade_date,
         )
+
+    # Alias for modern snapshot restore
+    from_snapshot = from_dynamo_snapshot
+
 
     # ── Portfolio snapshot (input to PM agent) ────────────────────────────────
 
