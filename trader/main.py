@@ -48,7 +48,40 @@ app = FastAPI(
 )
 
 
-# ─── CORS ────────────────────────────────────────────────────────────────────
+# ─── Vercel path fix ASGI middleware ─────────────────────────────────────────
+
+class VercelPathFixMiddleware:
+    """
+    ASGI middleware that restores the real request path when Vercel serverless
+    rewrites requests to /api/index.py or passes x-forwarded-uri / x-matched-path.
+    """
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            headers = dict(scope.get("headers", []))
+            forwarded = (
+                headers.get(b"x-forwarded-uri")
+                or headers.get(b"x-matched-path")
+                or headers.get(b"x-vercel-matched-path")
+                or headers.get(b"x-real-url")
+            )
+            if forwarded:
+                raw_path = forwarded.decode("utf-8").split("?")[0]
+                if scope.get("path", "").endswith("index.py") or scope.get("path") in ("/api/index.py", "/api/index"):
+                    scope["path"] = raw_path
+                    scope["raw_path"] = raw_path.encode("utf-8")
+
+            cur_path = scope.get("path", "")
+            if not cur_path.startswith("/api") and cur_path not in ("/docs", "/redoc", "/openapi.json", "/"):
+                scope["path"] = f"/api{cur_path}"
+                scope["raw_path"] = scope["path"].encode("utf-8")
+
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(VercelPathFixMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
