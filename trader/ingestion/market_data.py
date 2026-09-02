@@ -14,6 +14,7 @@ import logging
 from datetime import date, datetime, timedelta
 from .cache import Cache
 
+import numpy as np
 import pandas as pd
 import yfinance as yf
 from zoneinfo import ZoneInfo
@@ -162,67 +163,74 @@ def compute_technical_indicators(df: pd.DataFrame) -> dict:
     At least 20 rows required; 30+ recommended for stable 20-period indicators.
 
     Returns a dict of float values (None where data is insufficient).
-    Uses pandas_ta functional API (not the DataFrame accessor) for Python 3.13 compatibility.
+    Pure pandas implementation with zero heavy C/LLVM dependencies.
     """
-    import pandas_ta as pta
-
     if len(df) < 20:
         raise ValueError(f"Need ≥20 rows for technical indicators; got {len(df)}")
 
     ta_df = df[["open", "high", "low", "close", "volume"]].copy().reset_index(drop=True)
-    close  = ta_df["close"]
-    high   = ta_df["high"]
-    low    = ta_df["low"]
-    volume = ta_df["volume"]
+    close  = ta_df["close"].astype(float)
+    high   = ta_df["high"].astype(float)
+    low    = ta_df["low"].astype(float)
+    volume = ta_df["volume"].astype(float)
 
-    def _last(series) -> float | None:
-        if series is None or (hasattr(series, "empty") and series.empty):
-            return None
-        try:
-            val = series.iloc[-1]
-            return float(val) if pd.notna(val) else None
-        except Exception:
-            return None
+    def _val(val) -> float | None:
+        return float(val) if pd.notna(val) else None
 
-    def _col_starts(df_out, prefix: str) -> float | None:
-        """Extract the last value from the first column starting with `prefix`."""
-        if df_out is None or df_out.empty:
-            return None
-        col = next((c for c in df_out.columns if c.startswith(prefix)), None)
-        return _last(df_out[col]) if col else None
+    # RSI 14
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi_series = 100.0 - (100.0 / (1.0 + rs))
+    rsi_14 = _val(rsi_series.iloc[-1])
 
-    rsi_14 = _last(pta.rsi(close, length=14))
+    # Moving Averages
+    sma_5  = _val(close.rolling(5).mean().iloc[-1])
+    sma_20 = _val(close.rolling(20).mean().iloc[-1])
+    sma_50 = _val(close.rolling(50).mean().iloc[-1]) if len(ta_df) >= 50 else None
 
-    sma_5  = _last(pta.sma(close, length=5))
-    sma_20 = _last(pta.sma(close, length=20))
-    sma_50 = _last(pta.sma(close, length=50)) if len(ta_df) >= 50 else None
+    ema_12_series = close.ewm(span=12, adjust=False).mean()
+    ema_26_series = close.ewm(span=26, adjust=False).mean()
+    ema_12 = _val(ema_12_series.iloc[-1])
+    ema_26 = _val(ema_26_series.iloc[-1])
 
-    ema_12 = _last(pta.ema(close, length=12))
-    ema_26 = _last(pta.ema(close, length=26))
+    # MACD
+    macd_series = ema_12_series - ema_26_series
+    signal_series = macd_series.ewm(span=9, adjust=False).mean()
+    macd = _val(macd_series.iloc[-1])
+    macd_signal = _val(signal_series.iloc[-1])
 
-    macd_df = pta.macd(close, fast=12, slow=26, signal=9)
-    macd = macd_signal = None
-    if macd_df is not None and not macd_df.empty:
-        macd        = _col_starts(macd_df, "MACD_")
-        macd_signal = _col_starts(macd_df, "MACDs_")
+    # Bollinger Bands
+    std_20 = close.rolling(20).std()
+    bb_upper = _val((close.rolling(20).mean() + 2 * std_20).iloc[-1])
+    bb_mid   = sma_20
+    bb_lower = _val((close.rolling(20).mean() - 2 * std_20).iloc[-1])
 
-    bb_df = pta.bbands(close, length=20, std=2)
-    bb_upper = bb_mid = bb_lower = None
-    if bb_df is not None and not bb_df.empty:
-        bb_upper = _col_starts(bb_df, "BBU_")
-        bb_mid   = _col_starts(bb_df, "BBM_")
-        bb_lower = _col_starts(bb_df, "BBL_")
+    # ATR 14
+    prev_close = close.shift(1)
+    tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+    atr_series = tr.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    atr_14 = _val(atr_series.iloc[-1])
 
-    atr_14 = _last(pta.atr(high, low, close, length=14))
+    # ADX 14
+    up_move = high.diff()
+    down_move = -low.diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    tr_smooth = pd.Series(tr).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    plus_di = 100.0 * pd.Series(plus_dm).ewm(alpha=1/14, min_periods=14, adjust=False).mean() / tr_smooth.replace(0, np.nan)
+    minus_di = 100.0 * pd.Series(minus_dm).ewm(alpha=1/14, min_periods=14, adjust=False).mean() / tr_smooth.replace(0, np.nan)
+    dx = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+    adx_series = dx.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    adx_14 = _val(adx_series.iloc[-1])
 
-    adx_df = pta.adx(high, low, close, length=14)
-    adx_14 = _col_starts(adx_df, "ADX_")
-
-    # VWAP for the latest trading session (typical price — daily resolution only)
+    # VWAP today (typical price)
     last_row = ta_df.iloc[-1]
     vwap_today = float((last_row["high"] + last_row["low"] + last_row["close"]) / 3)
 
-    close = ta_df["close"]
     pct_1d  = float((close.iloc[-1] / close.iloc[-2]  - 1) * 100) if len(close) >= 2  else None
     pct_5d  = float((close.iloc[-1] / close.iloc[-6]  - 1) * 100) if len(close) >= 6  else None
     pct_20d = float((close.iloc[-1] / close.iloc[-21] - 1) * 100) if len(close) >= 21 else None
