@@ -50,32 +50,25 @@ app = FastAPI(
 
 # ─── CORS ────────────────────────────────────────────────────────────────────
 
-_ALLOWED_ORIGINS = (
-    ["*"]
-    if settings.environment == "development"
-    else [
-        "https://your-vercel-app.vercel.app",  # replace with actual Vercel URL
-        "http://localhost:3000",
-    ]
-)
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_ALLOWED_ORIGINS,
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["GET", "OPTIONS"],
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
 # ─── API key auth dependency ──────────────────────────────────────────────────
 
+_PUBLIC_PATHS = {"/api/health", "/health", "/healthz", "/docs", "/openapi.json", "/redoc", "/"}
+
 def verify_api_key(request: Request) -> None:
     """
-    Require X-API-Key header on all routes except /api/health.
-    Health check is public so uptime monitors can reach it without auth.
+    Require X-API-Key header on protected routes.
+    Health check, docs, and root are public.
     """
-    if request.url.path == "/api/health":
+    if request.url.path in _PUBLIC_PATHS:
         return
     key = request.headers.get("X-API-Key", "")
     if not key or key != settings.api_key:
@@ -97,11 +90,17 @@ app.include_router(logs.router,      dependencies=[_auth])
 app.include_router(report.router,    dependencies=[_auth])
 
 
-# ─── Root redirect ───────────────────────────────────────────────────────────
+# ─── Root & Health aliases ───────────────────────────────────────────────────
+
+@app.get("/health", response_model=health.HealthResponse, include_in_schema=False)
+def health_alias() -> health.HealthResponse:
+    return health.get_health()
+
 
 @app.get("/", include_in_schema=False)
 def root():
     return JSONResponse({"message": "NSE LLM Trader API. See /docs for endpoints."})
+
 
 
 # ─── Global exception handler ────────────────────────────────────────────────
