@@ -1,0 +1,20 @@
+# Ignore frontend and local files when bundling Python Serverless Functions
+dashboard/
+.next/
+node_modules/
+.venv/
+.git/
+.github/
+.pytest_cache/
+__pycache__/
+*.pyc
+logs/
+papers/
+infra/
+build/
+*.egg-info/
+trader/tests/
+CLAUDE.md
+PLAN.md
+docker-compose.yml
+Dockerfile
