@@ -1,8 +1,9 @@
 name: Daily Trading Pipeline
 on:
-  schedule:
-    # 15:35 IST (10:05 UTC) Mon-Fri
-    - cron: '5 10 * * 1-5'
+  # Temporarily paused schedule
+  # schedule:
+  #   # 15:35 IST (10:05 UTC) Mon-Fri
+  #   - cron: '5 10 * * 1-5'
   workflow_dispatch:
 
 jobs:
